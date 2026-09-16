@@ -1,0 +1,20 @@
+# Dependencies
+node_modules/
+
+# Build output (the extension goes into GitHub Releases)
+dist/
+
+# Logs
+*.log
+npm-debug.log*
+
+# Local secrets (never commit a token)
+token
+.env
+
+# Editor / OS files
+.vscode/
+.idea/
+*.swp
+.DS_Store
+Thumbs.db
