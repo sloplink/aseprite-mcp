@@ -1,0 +1,25 @@
+{
+  "name": "aseprite-mcp",
+  "version": "0.2.0",
+  "description": "MCP server that lets an AI assistant (e.g. Claude) draw live in Aseprite",
+  "type": "module",
+  "main": "server.mjs",
+  "bin": { "aseprite-mcp": "server.mjs" },
+  "files": ["server.mjs", "README.md", "LICENSE"],
+  "scripts": {
+    "start": "node server.mjs",
+    "token": "node server.mjs token",
+    "build": "node scripts/build-extension.mjs",
+    "test": "node --test test/e2e.test.mjs"
+  },
+  "keywords": ["aseprite", "mcp", "model-context-protocol", "pixel-art", "claude"],
+  "author": "sloplink",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/sloplink/aseprite-mcp.git" },
+  "engines": { "node": ">=18" },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
+    "ws": "^8.21.0",
+    "zod": "^4.0.0"
+  }
+}
