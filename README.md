@@ -1,4 +1,4 @@
-# aseprite-mcp
+# MCP for Aseprite[Extension]
 
 Let an AI assistant such as **Claude** draw live in your running **Aseprite** via the
 [Model Context Protocol](https://modelcontextprotocol.io).
