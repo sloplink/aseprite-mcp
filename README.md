@@ -1,13 +1,13 @@
 # MCP for Aseprite[Extension]
 
-Let an AI assistant such as **Claude** draw live in your running **Aseprite** via the
+Let an AI assistant draw live in your running **Aseprite** via the
 [Model Context Protocol](https://modelcontextprotocol.io).
 
-> Unofficial community project. Not affiliated with or endorsed by Anthropic or Igara Studio.
+> Unofficial community project. Not affiliated with or endorsed by Anthropic or **Igara Studio (Aseprite)**.
 > **Use at your own risk** – see [DISCLAIMER.md](DISCLAIMER.md).
 
 ```
-MCP client (e.g. Claude Code) ⇄ stdio ⇄ aseprite-mcp ⇄ WebSocket 127.0.0.1 ⇄ Aseprite + MCP Bridge extension
+MCP client ⇄ stdio ⇄ aseprite-mcp ⇄ WebSocket 127.0.0.1 ⇄ Aseprite + MCP Bridge extension
 ```
 
 The assistant can create sprites, set exact pixels, use Aseprite's tools (line, rectangle,
