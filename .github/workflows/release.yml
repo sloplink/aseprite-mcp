@@ -1,0 +1,33 @@
+name: Release
+
+# Push a tag like v0.4.0 to publish a GitHub release with the Aseprite extension attached.
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+      - run: sudo apt-get update && sudo apt-get install -y lua5.4 lua-dkjson
+      - run: npm ci
+      - run: node --test --test-reporter=spec
+      - name: Tag must match package version
+        run: test "v$(node -p 'require("./package.json").version')" = "$GITHUB_REF_NAME"
+      - run: npm run build
+      - name: Release notes from CHANGELOG.md
+        run: |
+          v="${GITHUB_REF_NAME#v}"
+          awk -v v="$v" '$0 ~ "^## "v"$" {on=1; next} /^## / {on=0} on' CHANGELOG.md > notes.md
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release create "$GITHUB_REF_NAME" dist/aseprite-mcp-bridge.aseprite-extension --title "$GITHUB_REF_NAME" --notes-file notes.md

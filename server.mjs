@@ -14,21 +14,21 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { WebSocketServer } from "ws";
 import { z } from "zod";
-import { readFile, writeFile, mkdir, unlink, chmod } from "node:fs/promises";
+import { readFile, writeFile, mkdir, unlink, chmod, rename } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from "node:crypto";
 
-const VERSION = "0.2.0";
+const VERSION = "0.4.0";
 const PROTOCOL = 2;
 const PORT = Number(process.env.ASEPRITE_MCP_PORT ?? 9123);
 const HOST = "127.0.0.1"; // local only, on purpose
 const TIMEOUT_MS = Number(process.env.ASEPRITE_MCP_TIMEOUT ?? 15000);
 const AUTH_TIMEOUT_MS = 5000;
 const ALLOW_LUA = process.env.ASEPRITE_MCP_ALLOW_LUA === "1";
-const TOKEN_FILE =
-  process.env.ASEPRITE_MCP_TOKEN_FILE ??
-  join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "aseprite-mcp", "token");
+const CONFIG_DIR = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "aseprite-mcp");
+const TOKEN_FILE = process.env.ASEPRITE_MCP_TOKEN_FILE ?? join(CONFIG_DIR, "token");
+const PALETTE_FILE = process.env.ASEPRITE_MCP_PALETTE_FILE ?? join(CONFIG_DIR, "palettes.json");
 
 const log = (...a) => console.error("[aseprite-mcp]", ...a);
 
@@ -89,7 +89,8 @@ Environment:
   ASEPRITE_MCP_ALLOW_LUA=1   register the aseprite_run_lua tool
   ASEPRITE_MCP_TIMEOUT       per-command timeout in ms (default 15000)
   ASEPRITE_MCP_TOKEN         use this token instead of the token file
-  ASEPRITE_MCP_TOKEN_FILE    token file location (default ${TOKEN_FILE})`);
+  ASEPRITE_MCP_TOKEN_FILE    token file location (default ${TOKEN_FILE})
+  ASEPRITE_MCP_PALETTE_FILE  saved palettes (default ${PALETTE_FILE})`);
   process.exit(0);
 }
 
@@ -99,6 +100,7 @@ const TOKEN = await loadToken();
 // WebSocket bridge
 // ---------------------------------------------------------------------------
 let client = null; // authenticated Aseprite connection
+let extensionVersion = null; // reported by the extension (null = older than 0.4.0)
 let nextId = 1;
 const pending = new Map(); // id -> {resolve, reject, timer}
 
@@ -150,7 +152,9 @@ wss.on("connection", (ws, req) => {
         client.close(4000, "replaced");
       }
       client = ws;
-      log(`Aseprite ${msg.version ?? "?"} connected and authenticated.`);
+      extensionVersion = typeof msg.extension === "string" ? msg.extension : null;
+      log(`Aseprite ${msg.version ?? "?"} (extension ${extensionVersion ?? "< 0.4.0"}) connected and authenticated.`);
+      if (versionWarning()) log(versionWarning());
       return;
     }
 
@@ -171,6 +175,14 @@ wss.on("connection", (ws, req) => {
     }
   });
 });
+
+function versionWarning() {
+  if (extensionVersion === VERSION) return null;
+  return (
+    `The MCP Bridge extension in Aseprite is version ${extensionVersion ?? "< 0.4.0"}, the server is ${VERSION}. ` +
+    "Install the matching extension (dist/aseprite-mcp-bridge.aseprite-extension) and restart Aseprite."
+  );
+}
 
 function call(cmd, args = {}) {
   return new Promise((resolve, reject) => {
@@ -196,10 +208,12 @@ function call(cmd, args = {}) {
 // ---------------------------------------------------------------------------
 // MCP tools
 // ---------------------------------------------------------------------------
-const server = new McpServer({ name: "aseprite", version: VERSION });
+const INSTRUCTIONS = await readFile(new URL("./instructions.md", import.meta.url), "utf8").catch(() => undefined);
+const server = new McpServer({ name: "aseprite", version: VERSION }, { instructions: INSTRUCTIONS });
 
+// Compact JSON on purpose: every byte of a tool result costs the assistant tokens.
 const asText = (obj) => ({
-  content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj, null, 2) }],
+  content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj) }],
 });
 
 function tool(name, config, fn) {
@@ -221,83 +235,183 @@ const target = {
   layer: z.string().optional().describe("Layer name (default: active layer)"),
   frame: z.number().int().min(1).optional().describe("Frame number, 1-based (default: active frame)"),
 };
+const MAX_PIXELS = 65536;
+const rect = z.tuple([z.number().int(), z.number().int(), z.number().int().min(1), z.number().int().min(1)]);
+const mapPalette = z.record(z.string().length(1), color);
+const paletteName = z
+  .string()
+  .regex(/^[A-Za-z0-9][\w .-]{0,63}$/, "letters, digits, space, _ . - (max 64, starting with a letter or digit)")
+  .describe("Name of a palette saved with aseprite_palette");
 
-tool(
-  "aseprite_status",
-  {
-    title: "Status / sprite info",
-    description:
-      "Checks the connection and returns info about the active sprite: size, color mode, layers, frames, active layer/frame. Coordinates start at (0,0) in the top-left corner.",
-    inputSchema: {},
-    annotations: { readOnlyHint: true },
-  },
-  async () => asText(await call("info"))
+// Pixel map (palette + text rows) -> [x, y, color] list for set_pixels
+const SKIP_CHARS = new Set([".", " "]);
+function pixelMapToPixels({ palette, rows, x = 0, y = 0 }) {
+  const pixels = [];
+  const unknown = new Set();
+  rows.forEach((row, j) => {
+    Array.from(row).forEach((ch, i) => {
+      if (SKIP_CHARS.has(ch)) return;
+      const c = palette[ch];
+      if (c === undefined) unknown.add(ch);
+      else pixels.push([x + i, y + j, c]);
+    });
+  });
+  if (unknown.size) {
+    throw new Error(
+      `Characters not in palette: ${[...unknown].map((c) => JSON.stringify(c)).join(", ")}. ` +
+        `Palette keys: ${Object.keys(palette).join("") || "(none)"}; use '.' or space for "leave unchanged".`
+    );
+  }
+  if (pixels.length > MAX_PIXELS) throw new Error(`Too many pixels (${pixels.length} > ${MAX_PIXELS}).`);
+  return pixels;
+}
+
+// Raw "rrggbbaa…" rows from Aseprite -> pixel_map format (palette + text rows).
+// '"' and '\' are left out because they need escaping in JSON (= extra tokens).
+const MAP_KEYS = Array.from(
+  "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789#$%&*+-/:;<=>?@^_~!|()[]{},'`"
 );
+function normHex(c) {
+  let h = c.replace(/^#/, "").toLowerCase();
+  if (h.length <= 4) h = h.replace(/./g, "$&$&");
+  return h.length === 6 ? h + "ff" : h;
+}
+const shortHex = (h) => "#" + (h.endsWith("ff") ? h.slice(0, 6) : h);
 
-tool(
-  "aseprite_new_sprite",
-  {
+function hexRowsToPixelMap(rawRows, preferred = {}) {
+  const keyOf = new Map(); // rrggbbaa -> key
+  for (const [k, c] of Object.entries(preferred)) {
+    const h = normHex(c);
+    if (!SKIP_CHARS.has(k) && !h.endsWith("00") && !keyOf.has(h)) keyOf.set(h, k);
+  }
+  const taken = new Set(keyOf.values());
+  const free = MAP_KEYS.filter((k) => !taken.has(k));
+  const palette = {};
+  const rows = rawRows.map((raw) => {
+    let row = "";
+    for (let i = 0; i < raw.length; i += 8) {
+      const h = raw.slice(i, i + 8);
+      if (h.endsWith("00")) {
+        row += ".";
+        continue;
+      }
+      let k = keyOf.get(h);
+      if (k === undefined) {
+        k = free.shift();
+        if (k === undefined) {
+          throw new Error(`Region has more than ${MAP_KEYS.length} colors; read a smaller rect or use aseprite_view.`);
+        }
+        keyOf.set(h, k);
+      }
+      palette[k] ??= shortHex(h);
+      row += k;
+    }
+    return row.replace(/\.+$/, "");
+  });
+  return { palette, rows };
+}
+
+// Saved palettes: { name: { key: color } } in PALETTE_FILE
+async function loadPalettes() {
+  try {
+    const all = JSON.parse(await readFile(PALETTE_FILE, "utf8"));
+    if (!all || typeof all !== "object" || Array.isArray(all)) throw new Error("not a JSON object");
+    return all;
+  } catch (err) {
+    if (err.code === "ENOENT") return {};
+    throw new Error(`Could not read ${PALETTE_FILE}: ${err.message}`);
+  }
+}
+
+async function storePalettes(all) {
+  await mkdir(dirname(PALETTE_FILE), { recursive: true });
+  // write + rename, so an interrupted write never leaves a broken file behind
+  const tmp = `${PALETTE_FILE}.${randomUUID()}.tmp`;
+  await writeFile(tmp, JSON.stringify(all, null, 1) + "\n");
+  await rename(tmp, PALETTE_FILE);
+}
+
+const savedPalette = (all, name) => (Object.hasOwn(all, name) ? all[name] : undefined);
+
+// Saved palette (paletteName) merged with an inline palette; inline keys win.
+async function resolvePalette({ palette, paletteName }) {
+  if (!paletteName) return palette;
+  const saved = savedPalette(await loadPalettes(), paletteName);
+  if (!saved) throw new Error(`No saved palette '${paletteName}'. Use aseprite_palette action=list.`);
+  return { ...saved, ...palette };
+}
+
+// Raw pixels ("rrggbbaa" rows) from Aseprite
+async function getPixels(args) {
+  try {
+    return await call("get_pixels", args);
+  } catch (err) {
+    if (/unknown command/i.test(err.message)) {
+      throw new Error(`${err.message} – the Aseprite extension is outdated; install the current MCP Bridge extension and restart Aseprite.`);
+    }
+    throw err;
+  }
+}
+
+const splitHex = (row) => row.match(/.{8}/g) ?? [];
+
+// Operations usable both as individual tools and inside aseprite_batch.
+// returnsInfo: the Lua side replies with the full sprite status.
+const ops = {
+  new_sprite: {
     title: "New sprite",
-    description: "Creates a new sprite and makes it active.",
-    inputSchema: {
+    description: "Creates a new sprite and makes it active. Returns the sprite status.",
+    shape: {
       width: z.number().int().min(1).max(4096),
       height: z.number().int().min(1).max(4096),
       colorMode: z.enum(["rgb", "gray", "indexed"]).default("rgb"),
       background: color.optional().describe("Optional: fill the canvas with this color"),
     },
+    returnsInfo: true,
+    run: (a) => call("new_sprite", a),
   },
-  async (a) => asText(await call("new_sprite", a))
-);
-
-tool(
-  "aseprite_open",
-  {
-    title: "Open file",
-    description: "Opens a file (.aseprite, .png, .gif, ...) as the active sprite.",
-    inputSchema: { path: z.string().describe("Absolute path") },
-  },
-  async (a) => asText(await call("open", a))
-);
-
-tool(
-  "aseprite_save",
-  {
-    title: "Save",
+  pixel_map: {
+    title: "Draw pixel map",
     description:
-      "Saves the active sprite. Without path the existing file is overwritten. With copy=true only a copy is exported (e.g. as .png).",
-    inputSchema: {
-      path: z.string().optional().describe("Absolute path including extension (.aseprite, .png, .gif, ...)"),
-      copy: z.boolean().default(false),
+      "Most token-efficient way to draw many exact pixels: a palette of single-character keys and one text row per pixel row. " +
+      "'.' and space leave the pixel unchanged; map a key to '#00000000' to erase. One undo step. " +
+      'Example: palette {"k":"#222034","y":"#fbf236"}, rows ["..kk..", ".kyyk.", "kyyyyk"].',
+    shape: {
+      palette: mapPalette.optional().describe("Single character -> hex color (required unless paletteName is given)"),
+      paletteName: paletteName.optional(),
+      rows: z.array(z.string()).min(1).max(4096).describe("One string per pixel row, top to bottom"),
+      x: z.number().int().default(0).describe("Left edge of the map on the canvas"),
+      y: z.number().int().default(0).describe("Top edge of the map on the canvas"),
+      ...target,
+    },
+    run: async ({ palette, paletteName, rows, x, y, ...rest }) => {
+      palette = await resolvePalette({ palette, paletteName });
+      if (!palette) throw new Error("Pass palette or paletteName.");
+      const pixels = pixelMapToPixels({ palette, rows, x, y });
+      if (!pixels.length) return { drawn: 0 };
+      return call("set_pixels", { ...rest, pixels });
     },
   },
-  async (a) => asText(await call("save", a))
-);
-
-tool(
-  "aseprite_set_pixels",
-  {
+  set_pixels: {
     title: "Set pixels",
     description:
-      "Sets individual pixels exactly (ideal for pixel art), as a single undo step. The color '#00000000' erases a pixel.",
-    inputSchema: {
+      "Sets individual pixels exactly, as a single undo step. The color '#00000000' erases a pixel. " +
+      "For more than a few pixels prefer aseprite_pixel_map (far fewer tokens).",
+    shape: {
       pixels: z
         .array(z.tuple([z.number().int(), z.number().int(), color]))
         .min(1)
-        .max(65536)
+        .max(MAX_PIXELS)
         .describe("List of [x, y, color]"),
       ...target,
     },
+    run: (a) => call("set_pixels", a),
   },
-  async (a) => asText(await call("set_pixels", a))
-);
-
-tool(
-  "aseprite_draw",
-  {
+  draw: {
     title: "Draw with a tool",
     description:
-      "Uses an Aseprite tool like a mouse stroke. line/rectangle/filled_rectangle/ellipse/filled_ellipse take 2 points (start, end). pencil/eraser/spray take any number of points (freehand path). paint_bucket takes 1 point. curve takes 4 points. polygon/contour take the corner points.",
-    inputSchema: {
+      "Uses an Aseprite tool like a mouse stroke. line/rectangle/filled_rectangle/ellipse/filled_ellipse take 2 points (start, end; inclusive). pencil/eraser/spray take any number of points (freehand path). paint_bucket takes 1 point. curve takes 4 points. polygon/contour take the corner points.",
+    shape: {
       tool: z.enum([
         "pencil",
         "eraser",
@@ -323,68 +437,314 @@ tool(
       pixelPerfect: z.boolean().default(false).describe("Pixel-perfect freehand for pencil"),
       ...target,
     },
+    run: (a) => call("draw", a),
   },
-  async (a) => asText(await call("draw", a))
-);
-
-tool(
-  "aseprite_clear",
-  {
+  clear: {
     title: "Clear",
     description: "Clears the whole layer in the frame, or only a rectangle.",
-    inputSchema: {
+    shape: {
       rect: z
         .tuple([z.number().int(), z.number().int(), z.number().int().min(1), z.number().int().min(1)])
         .optional()
         .describe("[x, y, width, height]"),
       ...target,
     },
+    run: (a) => call("clear", a),
   },
-  async (a) => asText(await call("clear", a))
-);
-
-tool(
-  "aseprite_layer",
-  {
+  layer: {
     title: "Manage layers",
-    description: "Create (new), activate (select), delete, rename, or show/hide (visible) a layer.",
-    inputSchema: {
+    description:
+      "Create (new, becomes active), activate (select), delete, rename, or show/hide (visible) a layer. Returns the sprite status.",
+    shape: {
       action: z.enum(["new", "select", "delete", "rename", "visible"]),
       name: z.string().describe("Layer name (for new: name of the new layer)"),
       newName: z.string().optional().describe("rename only"),
       visible: z.boolean().optional().describe("visible only"),
     },
+    returnsInfo: true,
+    run: (a) => call("layer", a),
   },
-  async (a) => asText(await call("layer", a))
-);
-
-tool(
-  "aseprite_frame",
-  {
+  frame: {
     title: "Manage frames",
     description:
-      "Animation: create a frame (new, optionally copying the active one), activate (select), delete, or set its duration (in seconds).",
-    inputSchema: {
+      "Animation: create a frame after the given/active one (new, copies it by default, becomes active), activate (select), delete, or set its duration (in seconds). " +
+      "To draw several frames at once use aseprite_animation. Returns the sprite status.",
+    shape: {
       action: z.enum(["new", "select", "delete", "duration"]),
-      frame: z.number().int().min(1).optional().describe("Frame number (select/delete/duration)"),
-      copy: z.boolean().default(true).describe("new: copy the active frame instead of an empty one"),
+      frame: z.number().int().min(1).optional().describe("Frame number (default: active frame); new inserts after it"),
+      copy: z.boolean().default(true).describe("new: copy that frame instead of inserting an empty one"),
       duration: z.number().positive().optional().describe("Seconds, e.g. 0.1"),
     },
+    returnsInfo: true,
+    run: (a) => call("frame", a),
   },
-  async (a) => asText(await call("frame", a))
-);
-
-tool(
-  "aseprite_history",
-  {
+  copy: {
+    title: "Copy / mirror a region",
+    description:
+      "Copies a rectangle of pixels, optionally flipped, to another position, layer or frame (one undo step). " +
+      "Without x/y it writes back in place, so flip='h' mirrors the region where it is. " +
+      "Symmetry example on a 16px-wide sprite: rect [0,0,8,16], flip 'h', x 8 mirrors the left half onto the right half.",
+    shape: {
+      rect: rect.describe("Source [x, y, width, height]"),
+      fromLayer: z.string().optional().describe("Source layer (default: active layer)"),
+      fromFrame: z.number().int().min(1).optional().describe("Source frame (default: active frame)"),
+      x: z.number().int().optional().describe("Destination left edge (default: source x)"),
+      y: z.number().int().optional().describe("Destination top edge (default: source y)"),
+      layer: z.string().optional().describe("Destination layer (default: fromLayer, else active layer)"),
+      frame: z.number().int().min(1).optional().describe("Destination frame (default: fromFrame, else active frame)"),
+      flip: z.enum(["none", "h", "v", "both"]).default("none").describe("h = mirror left/right, v = top/bottom"),
+      skipTransparent: z.boolean().default(false).describe("Leave destination pixels alone where the source is transparent"),
+    },
+    run: async ({ rect: r, fromLayer, fromFrame, x, y, layer, frame, flip, skipTransparent }) => {
+      const src = await getPixels({ rect: r, layer: fromLayer, frame: fromFrame });
+      let grid = src.rows.map(splitHex);
+      if (flip === "h" || flip === "both") grid = grid.map((row) => row.reverse());
+      if (flip === "v" || flip === "both") grid.reverse();
+      // src.x/src.y are the clipped source corner; keep the same offset at the destination
+      const dx = (x ?? r[0]) + (src.x - r[0]);
+      const dy = (y ?? r[1]) + (src.y - r[1]);
+      const pixels = [];
+      grid.forEach((row, j) =>
+        row.forEach((h, i) => {
+          if (skipTransparent && h.endsWith("00")) return;
+          pixels.push([dx + i, dy + j, "#" + h]);
+        })
+      );
+      if (!pixels.length) return { drawn: 0 };
+      return call("set_pixels", {
+        pixels,
+        layer: layer ?? fromLayer ?? src.layer,
+        frame: frame ?? fromFrame ?? src.frame,
+      });
+    },
+  },
+  animation: {
+    title: "Draw an animation",
+    description:
+      "Draws several frames in ONE call, each as a pixel map, creating missing frames automatically. " +
+      "With copyPrevious (default) a new frame starts as a copy of the previous one, so each entry only needs the changed rows " +
+      "(use x/y and '.' to leave pixels unchanged; '.' never erases, map a key to '#00000000' for that). Returns the sprite status.",
+    shape: {
+      frames: z
+        .array(
+          z
+            .object({
+              rows: z.array(z.string()).max(4096).describe("Pixel rows for this frame (may be empty = unchanged)"),
+              x: z.number().int().default(0),
+              y: z.number().int().default(0),
+              palette: mapPalette.optional().describe("Extra/overriding keys for this frame"),
+              duration: z.number().positive().optional().describe("Seconds"),
+            })
+            .strict()
+        )
+        .min(1)
+        .max(256),
+      palette: mapPalette.optional().describe("Palette shared by all frames"),
+      paletteName: paletteName.optional(),
+      start: z.number().int().min(1).default(1).describe("Frame number of the first entry"),
+      copyPrevious: z.boolean().default(true).describe("New frames start as a copy of the previous frame"),
+      duration: z.number().positive().optional().describe("Default duration of every drawn frame, in seconds"),
+      layer: z.string().optional().describe("Layer name (default: active layer)"),
+    },
+    returnsInfo: true,
+    run: async ({ frames, palette, paletteName, start, copyPrevious, duration, layer }) => {
+      const shared = (await resolvePalette({ palette, paletteName })) ?? {};
+      let count = (await call("info")).frameCount;
+      if (!count) throw new Error("No active sprite. Create one with aseprite_new_sprite.");
+      if (start > count + 1) throw new Error(`start ${start} is beyond the last frame + 1 (sprite has ${count} frames).`);
+      for (let i = 0; i < frames.length; i++) {
+        const f = frames[i];
+        const n = start + i;
+        try {
+          if (n > count) {
+            await call("frame", { action: "new", frame: n - 1, copy: copyPrevious });
+            count++;
+          }
+          const pixels = pixelMapToPixels({ palette: { ...shared, ...f.palette }, rows: f.rows, x: f.x, y: f.y });
+          if (pixels.length) await call("set_pixels", { pixels, layer, frame: n });
+          const d = f.duration ?? duration;
+          if (d) await call("frame", { action: "duration", frame: n, duration: d });
+        } catch (err) {
+          throw new Error(`frame entry #${i + 1} (frame ${n}): ${err.message}`);
+        }
+      }
+      await call("frame", { action: "select", frame: start });
+      return call("info");
+    },
+  },
+  history: {
     title: "Undo / redo",
     description: "Undoes or redoes steps.",
-    inputSchema: {
+    shape: {
       action: z.enum(["undo", "redo"]),
       steps: z.number().int().min(1).max(100).default(1),
     },
+    run: (a) => call("history", a),
   },
-  async (a) => asText(await call("history", a))
+  save: {
+    title: "Save",
+    description:
+      "Saves the active sprite. Without path the existing file is overwritten. With copy=true only a copy is exported (e.g. as .png).",
+    shape: {
+      path: z.string().optional().describe("Absolute path including extension (.aseprite, .png, .gif, ...)"),
+      copy: z.boolean().default(false),
+    },
+    run: (a) => call("save", a),
+  },
+};
+
+tool(
+  "aseprite_status",
+  {
+    title: "Status / sprite info",
+    description:
+      "Checks the connection and returns info about the active sprite: size, color mode, layers, frames, active layer/frame. Coordinates start at (0,0) in the top-left corner.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  },
+  async () => {
+    const info = { ...(await call("info")), server: VERSION };
+    const warning = versionWarning();
+    if (warning) info.warning = warning;
+    return asText(info);
+  }
+);
+
+tool(
+  "aseprite_open",
+  {
+    title: "Open file",
+    description: "Opens a file (.aseprite, .png, .gif, ...) as the active sprite.",
+    inputSchema: { path: z.string().describe("Absolute path") },
+  },
+  async (a) => asText(await call("open", a))
+);
+
+for (const [name, op] of Object.entries(ops)) {
+  tool(
+    `aseprite_${name}`,
+    { title: op.title, description: op.description, inputSchema: op.shape },
+    async (a) => asText(await op.run(a))
+  );
+}
+
+const batchSchemas = Object.fromEntries(
+  Object.entries(ops).map(([name, op]) => [name, z.object(op.shape).strict()])
+);
+
+tool(
+  "aseprite_batch",
+  {
+    title: "Batch operations",
+    description:
+      "Runs several operations in ONE call, in order (saves round trips and tokens). Each item is " +
+      '{"op": <name>, ...the same arguments as the tool aseprite_<name>}. ' +
+      `Allowed ops: ${Object.keys(ops).join(", ")}. ` +
+      "Stops at the first error; earlier ops stay applied (each op is its own undo step). " +
+      "Returns one short result per op plus the final sprite status if layers/frames changed. " +
+      'Example: [{"op":"layer","action":"new","name":"bg"},{"op":"draw","tool":"filled_rectangle","points":[[0,0],[15,15]],"color":"#5fcde4"},' +
+      '{"op":"layer","action":"new","name":"fg"},{"op":"pixel_map","palette":{"k":"#000"},"rows":["kk"],"x":4,"y":4}]',
+    inputSchema: {
+      ops: z
+        .array(z.object({ op: z.enum(Object.keys(ops)) }).passthrough())
+        .min(1)
+        .max(200),
+    },
+  },
+  async ({ ops: items }) => {
+    const results = [];
+    let needStatus = false;
+    for (let i = 0; i < items.length; i++) {
+      const { op: name, ...args } = items[i];
+      const where = `op #${i + 1} (${name})`;
+      const parsed = batchSchemas[name].safeParse(args);
+      if (!parsed.success) {
+        const why = parsed.error.issues.map((e) => `${e.path.join(".") || "args"}: ${e.message}`).join("; ");
+        throw new Error(`${where}: invalid arguments – ${why}. ${i} earlier op(s) were applied: ${JSON.stringify(results)}`);
+      }
+      try {
+        const res = await ops[name].run(parsed.data);
+        if (ops[name].returnsInfo) {
+          needStatus = true;
+          results.push("ok");
+        } else {
+          results.push(res);
+        }
+      } catch (err) {
+        throw new Error(`${where} failed: ${err?.message ?? err}. ${i} earlier op(s) were applied: ${JSON.stringify(results)}`);
+      }
+    }
+    const out = { results };
+    if (needStatus) out.status = await call("info");
+    return asText(out);
+  }
+);
+
+tool(
+  "aseprite_read_pixels",
+  {
+    title: "Read pixels as text",
+    description:
+      "Reads pixels back in the same palette + rows format as aseprite_pixel_map, so you can inspect exact colors " +
+      "or copy/modify a region cheaply. '.' = fully transparent; trailing '.' are cut off. " +
+      "Without layer the visible, flattened frame is read; with layer only that layer. " +
+      "Pass the palette (or paletteName) you drew with to get the same keys back. Max 16384 pixels per call.",
+    inputSchema: {
+      rect: rect.optional().describe("[x, y, width, height] (default: whole canvas)"),
+      palette: mapPalette.optional().describe("Preferred keys: character -> hex color"),
+      paletteName: paletteName.optional(),
+      ...target,
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ palette, paletteName, ...args }) => {
+    const preferred = await resolvePalette({ palette, paletteName });
+    const res = await getPixels({ ...args, flatten: !args.layer });
+    const out = { x: res.x, y: res.y, w: res.width, h: res.height, frame: res.frame };
+    if (res.layer) out.layer = res.layer;
+    return asText({ ...out, ...hexRowsToPixelMap(res.rows, preferred) });
+  }
+);
+
+tool(
+  "aseprite_palette",
+  {
+    title: "Saved palettes",
+    description:
+      "Stores named palettes (character -> color) on disk so they can be reused across sprites and sessions via " +
+      "paletteName in aseprite_pixel_map, aseprite_read_pixels, aseprite_animation. " +
+      "Actions: save (name + colors), list (all saved palettes), delete (name), " +
+      "from_image (name; collects the colors of the visible frame, or of layer/rect, and saves them with generated keys).",
+    inputSchema: {
+      action: z.enum(["save", "list", "delete", "from_image"]),
+      name: paletteName.optional().describe("Palette name (not needed for list)"),
+      colors: mapPalette.optional().describe("save only: character -> hex color"),
+      rect: rect.optional().describe("from_image only"),
+      ...target,
+    },
+  },
+  async ({ action, name, colors, rect: r, layer, frame }) => {
+    const all = await loadPalettes();
+    if (action === "list") return asText(all);
+    if (!name) throw new Error(`name is required for ${action}.`);
+    if (action === "delete") {
+      if (!savedPalette(all, name)) throw new Error(`No saved palette '${name}'.`);
+      delete all[name];
+      await storePalettes(all);
+      return asText({ deleted: name });
+    }
+    if (action === "save") {
+      if (!colors || !Object.keys(colors).length) throw new Error("colors is required for save.");
+      const bad = Object.keys(colors).filter((k) => SKIP_CHARS.has(k));
+      if (bad.length) throw new Error(`'.' and space cannot be palette keys.`);
+      all[name] = colors;
+    } else {
+      const res = await getPixels({ rect: r, layer, frame, flatten: !layer });
+      all[name] = hexRowsToPixelMap(res.rows).palette;
+    }
+    await storePalettes(all);
+    return asText({ saved: name, palette: all[name] });
+  }
 );
 
 tool(
@@ -392,9 +752,11 @@ tool(
   {
     title: "View image",
     description:
-      "Renders the visible, flattened frame as an upscaled PNG so you can look at and check the result yourself. Transparency is shown as a checkerboard.",
+      "Renders the visible, flattened frame as an upscaled PNG so you can look at and check the result yourself. Transparency is shown as a checkerboard. " +
+      "Use rect to zoom into a detail. Call it once after a drawing pass, not after every step.",
     inputSchema: {
       frame: z.number().int().min(1).optional(),
+      rect: rect.optional().describe("Only this [x, y, width, height] region, zoomed in (default: whole canvas)"),
       scale: z.number().int().min(1).max(64).optional().describe("Default: automatic (~512 px)"),
       checker: z.boolean().default(true),
       grid: z.boolean().default(false).describe("Draw a pixel grid (scale 4 or more)"),

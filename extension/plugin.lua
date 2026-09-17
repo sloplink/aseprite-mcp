@@ -2,6 +2,10 @@
 -- Connects Aseprite to the aseprite-mcp server so an AI assistant such as Claude
 -- can draw in the open editor. Menu: File > MCP Bridge...
 
+-- Never reuse modules cached by a previously loaded version of this extension
+-- (an update still needs an Aseprite restart to take effect reliably)
+package.loaded.sha256 = nil
+package.loaded.handlers = nil
 local S = require "sha256"
 local H = require "handlers"
 
@@ -83,6 +87,7 @@ local function handleAuth(sock, msg, token)
       nonce = clientNonce,
       mac = S.hmacHex(token, "client|" .. serverNonce .. "|" .. clientNonce),
       version = tostring(app.version),
+      extension = H.VERSION,
     })
     setStatus("Authenticating ...")
 
@@ -204,4 +209,10 @@ end
 
 function exit(plugin)
   disconnect()
+  -- An open window would keep running the old code after an update
+  if dlg then
+    local d = dlg
+    dlg = nil
+    pcall(function() d:close() end)
+  end
 end

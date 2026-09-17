@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        node: [18, 20, 22, 24]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+      - name: Install Lua (for the plugin tests)
+        run: sudo apt-get update && sudo apt-get install -y lua5.4 lua-dkjson
+      - run: npm ci
+      - name: Lua syntax check
+        run: for f in extension/*.lua test/*.lua; do luac5.4 -p "$f"; done
+      - run: node --test --test-reporter=spec
+      - run: npm run build
+      - uses: actions/upload-artifact@v4
+        if: matrix.node == 24
+        with:
+          name: aseprite-mcp-bridge
+          path: dist/aseprite-mcp-bridge.aseprite-extension

@@ -6,15 +6,21 @@ local pc = app.pixelColor
 
 local H = {}
 
+-- Keep in sync with extension/package.json
+local EXTENSION_VERSION = "0.4.0"
+
+H.VERSION = EXTENSION_VERSION
+
 -- Set by plugin.lua: function() -> boolean
 H._allowLua = function() return false end
 
 -- ---------------------------------------------------------------------------
 -- Helpers
 -- ---------------------------------------------------------------------------
-local colorCache = {}
+local colorCache, cachedColors = {}, 0
 local function parseColor(s)
   if colorCache[s] then return colorCache[s] end
+  if cachedColors >= 4096 then colorCache, cachedColors = {}, 0 end
   local h = tostring(s):gsub("^#", "")
   if #h == 3 or #h == 4 then h = h:gsub(".", "%0%0") end
   if not (#h == 6 or #h == 8) or h:find("[^%x]") then
@@ -27,10 +33,27 @@ local function parseColor(s)
     a = (#h == 8) and tonumber(h:sub(7, 8), 16) or 255,
   }
   colorCache[s] = c
+  cachedColors = cachedColors + 1
   return c
 end
 
-local function pixelValue(sprite, c)
+-- Nearest entry of the sprite palette, never the transparent index
+local function paletteIndex(sprite, c)
+  local pal, skip = sprite.palettes[1], sprite.transparentColor
+  local best, bestD = nil, math.huge
+  for i = 0, #pal - 1 do
+    if i ~= skip then
+      local p = pal:getColor(i)
+      local dr, dg, db = p.red - c.red, p.green - c.green, p.blue - c.blue
+      local d = dr * dr + dg * dg + db * db
+      if d < bestD then best, bestD = i, d end
+      if d == 0 then break end
+    end
+  end
+  return best or skip
+end
+
+local function pixelValue(sprite, c, cache)
   local mode = sprite.colorMode
   if mode == ColorMode.RGB then
     return pc.rgba(c.red, c.green, c.blue, c.alpha)
@@ -38,7 +61,12 @@ local function pixelValue(sprite, c)
     return pc.graya(c.gray, c.alpha)
   else -- INDEXED
     if c.alpha == 0 then return sprite.transparentColor end
-    return c.index
+    local v = cache[c]
+    if not v then
+      v = paletteIndex(sprite, c)
+      cache[c] = v
+    end
+    return v
   end
 end
 
@@ -78,16 +106,20 @@ local function getLayer(sprite, name)
   return l
 end
 
+local function frameNumber(sprite, n)
+  n = n or (app.frame and app.frame.frameNumber) or 1
+  if n < 1 or n > #sprite.frames then
+    error("Frame " .. n .. " does not exist (sprite has " .. #sprite.frames .. ").")
+  end
+  return n
+end
+
 local function target(args)
   local sprite = needSprite()
   local layer = getLayer(sprite, args.layer)
   if layer.isGroup then error("'" .. layer.name .. "' is a group, not an image layer.") end
   if layer.isTilemap then error("Tilemap layers are not supported.") end
-  local fn = args.frame or app.frame.frameNumber
-  if fn < 1 or fn > #sprite.frames then
-    error("Frame " .. fn .. " does not exist (sprite has " .. #sprite.frames .. ").")
-  end
-  return sprite, layer, fn
+  return sprite, layer, frameNumber(sprite, args.frame)
 end
 
 local function layerList(layers, out, prefix)
@@ -103,6 +135,15 @@ local function layerList(layers, out, prefix)
     if l.isGroup then layerList(l.layers, out, prefix .. l.name .. "/") end
   end
   return out
+end
+
+-- rect {x, y, w, h} (or nil = whole canvas) clipped to the canvas -> x, y, w, h
+local function clampRect(r, w, h)
+  if not r then return 0, 0, w, h end
+  local x0, y0 = math.max(0, r[1]), math.max(0, r[2])
+  local x1, y1 = math.min(w, r[1] + r[3]), math.min(h, r[2] + r[4])
+  if x1 <= x0 or y1 <= y0 then error("Rectangle lies outside the canvas (" .. w .. "x" .. h .. ").") end
+  return x0, y0, x1 - x0, y1 - y0
 end
 
 local function toPlain(v, depth)
@@ -122,7 +163,7 @@ end
 -- ---------------------------------------------------------------------------
 function H.info()
   local s = app.sprite
-  local base = { version = tostring(app.version), luaAllowed = H._allowLua() }
+  local base = { version = tostring(app.version), extension = EXTENSION_VERSION, luaAllowed = H._allowLua() }
   if not s then base.sprite = false; return base end
   local frames = {}
   for i, f in ipairs(s.frames) do frames[i] = f.duration end
@@ -145,16 +186,24 @@ function H.new_sprite(a)
   if a.colorMode == "gray" then mode = ColorMode.GRAY
   elseif a.colorMode == "indexed" then mode = ColorMode.INDEXED end
   local s = Sprite(a.width, a.height, mode)
+  -- Scripted sprites start with an all-black palette; use Aseprite's default one
+  -- (otherwise every color drawn on an indexed sprite ends up black)
+  local ok = pcall(function() app.command.LoadPalette{ preset = "default" } end)
+  if not ok or (#s.palettes[1] > 1 and s.palettes[1]:getColor(1).rgbaPixel == s.palettes[1]:getColor(2).rgbaPixel) then
+    pcall(function() s:setPalette(Palette{ fromResource = "DB32" }) end)
+  end
   if a.background then
     local cel = s.cels[1]
     local img = cel.image:clone()
-    img:clear(parseColor(a.background))
+    img:clear(pixelValue(s, parseColor(a.background), {}))
     cel.image = img
   end
   return H.info()
 end
 
 function H.open(a)
+  -- app.open would show a modal error in the UI for a missing file
+  if not app.fs.isFile(tostring(a.path)) then error("File not found: " .. tostring(a.path)) end
   local s = app.open(a.path)
   if not s then error("Could not open file: " .. tostring(a.path)) end
   return H.info()
@@ -178,6 +227,7 @@ function H.set_pixels(a)
   local px = a.pixels
   local n, skipped = #px, 0
   local w, h = sprite.width, sprite.height
+  local indexCache = {}
   app.transaction("MCP: set pixels", function()
     local cel = layer:cel(fn)
     if not cel then cel = sprite:newCel(layer, fn) end
@@ -188,7 +238,7 @@ function H.set_pixels(a)
       local p = px[i]
       local x, y = p[1], p[2]
       if x >= 0 and y >= 0 and x < w and y < h then
-        full:drawPixel(x, y, pixelValue(sprite, parseColor(p[3])))
+        full:drawPixel(x, y, pixelValue(sprite, parseColor(p[3]), indexCache))
       else
         skipped = skipped + 1
       end
@@ -234,7 +284,7 @@ function H.clear(a)
       return
     end
     local img = cel.image:clone()
-    local fill = layer.isBackground and app.bgColor or Color{ r = 0, g = 0, b = 0, a = 0 }
+    local fill = pixelValue(sprite, layer.isBackground and app.bgColor or Color{ r = 0, g = 0, b = 0, a = 0 }, {})
     if a.rect then
       local r = a.rect
       img:clear(Rectangle(r[1] - cel.position.x, r[2] - cel.position.y, r[3], r[4]), fill)
@@ -275,13 +325,13 @@ end
 
 function H.frame(a)
   local sprite = needSprite()
-  local n = a.frame or app.frame.frameNumber
+  local n = frameNumber(sprite, a.frame)
   if a.action == "new" then
     local f
     if a.copy == false then
-      f = sprite:newEmptyFrame(app.frame.frameNumber + 1)
+      f = sprite:newEmptyFrame(n + 1)
     else
-      f = sprite:newFrame(app.frame)
+      f = sprite:newFrame(n)
     end
     app.frame = f
   elseif a.action == "select" then
@@ -306,15 +356,26 @@ function H.history(a)
   return { done = a.action, steps = a.steps or 1 }
 end
 
+local MAX_VIEW = 4096 * 4096
+
 function H.snapshot(a)
   local sprite = needSprite()
-  local fn = a.frame or app.frame.frameNumber
-  local w, h = sprite.width, sprite.height
+  local fn = frameNumber(sprite, a.frame)
+  local sw, sh = sprite.width, sprite.height
+  local rx, ry, w, h = clampRect(a.rect, sw, sh)
   local scale = a.scale or math.max(1, math.min(64, math.floor(512 / math.max(w, h))))
   local W, HH = w * scale, h * scale
+  if W * HH > MAX_VIEW then
+    error("Image would be " .. W .. "x" .. HH .. " px; use a smaller scale or rect.")
+  end
 
-  local flat = Image(w, h, ColorMode.RGB)
+  local flat = Image(sw, sh, ColorMode.RGB)
   flat:drawSprite(sprite, fn)
+  if a.rect then
+    local crop = Image(w, h, ColorMode.RGB)
+    crop:drawImage(flat, Point(-rx, -ry), 255, BlendMode.SRC)
+    flat = crop
+  end
   if scale > 1 then flat:resize(W, HH) end
 
   local out = flat
@@ -347,7 +408,70 @@ function H.snapshot(a)
   end
 
   out:saveAs(a.path)
-  return { frame = fn, scale = scale, imageWidth = W, imageHeight = HH, spriteWidth = w, spriteHeight = h }
+  return { frame = fn, scale = scale, rect = { rx, ry, w, h }, imageWidth = W, imageHeight = HH,
+           spriteWidth = sw, spriteHeight = sh }
+end
+
+local MAX_READ = 16384
+
+-- Reads a rectangle of pixels as rows of "rrggbbaa" hex strings.
+-- With a.flatten: the visible, flattened frame; otherwise one layer (a.layer or the active one).
+function H.get_pixels(a)
+  local sprite = needSprite()
+  local fn = frameNumber(sprite, a.frame)
+  local w, h = sprite.width, sprite.height
+  local x0, y0, rw, rh = clampRect(a.rect, w, h)
+  local x1, y1 = x0 + rw, y0 + rh
+  if rw * rh > MAX_READ then
+    error("Region too large (" .. rw * rh .. " > " .. MAX_READ .. " pixels); pass a smaller rect.")
+  end
+
+  local img, mode, layerName
+  if not a.flatten then
+    local _, layer = target(a)
+    layerName = layer.name
+    mode = sprite.colorMode
+    img = Image(sprite.spec)
+    img:clear(mode == ColorMode.INDEXED and sprite.transparentColor or 0)
+    local cel = layer:cel(fn)
+    if cel then img:drawImage(cel.image, cel.position, 255, BlendMode.SRC) end
+  else
+    mode = ColorMode.RGB
+    img = Image(w, h, ColorMode.RGB)
+    img:drawSprite(sprite, fn)
+  end
+
+  local pal = sprite.palettes[1]
+  local transparent = sprite.transparentColor
+  local fmt = string.format
+  local cache = {}
+  local function hex(v)
+    local s = cache[v]
+    if s then return s end
+    if mode == ColorMode.RGB then
+      s = fmt("%02x%02x%02x%02x", pc.rgbaR(v), pc.rgbaG(v), pc.rgbaB(v), pc.rgbaA(v))
+    elseif mode == ColorMode.GRAY then
+      local g = pc.grayaV(v)
+      s = fmt("%02x%02x%02x%02x", g, g, g, pc.grayaA(v))
+    else
+      if v == transparent or v >= #pal then
+        s = "00000000"
+      else
+        local c = pal:getColor(v)
+        s = fmt("%02x%02x%02x%02x", c.red, c.green, c.blue, c.alpha)
+      end
+    end
+    cache[v] = s
+    return s
+  end
+
+  local rows = {}
+  for y = y0, y1 - 1 do
+    local parts = {}
+    for x = x0, x1 - 1 do parts[#parts + 1] = hex(img:getPixel(x, y)) end
+    rows[#rows + 1] = table.concat(parts)
+  end
+  return { x = x0, y = y0, width = rw, height = rh, frame = fn, layer = layerName, rows = rows }
 end
 
 function H.run_lua(a)
