@@ -782,12 +782,19 @@ test("tool schemas stay compatible with strict MCP clients", async () => {
       walk(t.inputSchema, t.name);
     }
     assert.deepEqual(bad, []);
+    const listed = JSON.stringify(tools);
+    assert.doesNotMatch(listed, /9007199254740991/, "no huge integer bounds in schemas");
+    assert.doesNotMatch(listed, /"pattern"/, "no repeated regex patterns in schemas");
     const help = await mcp.callTool({ name: "aseprite_help", arguments: {} });
     assert.match(help.content[0].text, /pixel_map/);
 
     // the exact shapes are still enforced by the server
     for (const [name, args] of [
       ["aseprite_draw", { tool: "line", points: [[0, 0, 1]] }],
+      ["aseprite_draw", { tool: "line", points: [[0.5, 0]] }],
+      ["aseprite_draw", { tool: "line", points: [[0, 0]], color: "red" }],
+      ["aseprite_new_sprite", { width: 16.5, height: 16 }],
+      ["aseprite_pixel_map", { palette: { a: "#12" }, rows: ["a"] }],
       ["aseprite_set_pixels", { pixels: [["0", 0, "#fff"]] }],
       ["aseprite_set_pixels", { pixels: [[0, 0]] }],
       ["aseprite_clear", { rect: [0, 0, 0, 5] }],
@@ -799,6 +806,8 @@ test("tool schemas stay compatible with strict MCP clients", async () => {
       const r = await mcp.callTool({ name, arguments: args });
       assert.ok(r.isError, `${name} ${JSON.stringify(args)} should be rejected`);
       assert.doesNotMatch(r.content[0].text, /not connected/, `${name} must fail validation, not at the connection`);
+      if (JSON.stringify(args).includes("0.5") || JSON.stringify(args).includes("16.5")) assert.match(r.content[0].text, /whole number/);
+      if (JSON.stringify(args).includes('"red"') || JSON.stringify(args).includes('"#12"')) assert.match(r.content[0].text, /hex color/);
     }
   } finally {
     await mcp.close();

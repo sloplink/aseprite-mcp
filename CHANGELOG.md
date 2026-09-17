@@ -19,6 +19,8 @@ Needs the MCP Bridge extension **0.6.0** for `aseprite_selection`, `aseprite_cha
 - `aseprite_palette` action `ramp`: hue-shifted shading ramps from base colours.
 - `aseprite_outline` (also in `aseprite_batch`): selective outline ("sel-out") or a solid
   outline, outside or inside the shapes.
+- Smaller tool list (~2,700 characters less per session): integer and colour checks are done by
+  the server instead of being repeated in every schema.
 - Compatibility: tool schemas no longer use tuples, `const` or `propertyNames` (rejected by
   some MCP clients such as Gemini); new `aseprite_help` returns the usage guide for clients that
   ignore server instructions; `aseprite_view` is rendered by the server for images up to

@@ -251,17 +251,20 @@ function tool(name, config, fn) {
   });
 }
 
+// Checks live here rather than in the JSON schema: regex patterns and huge integer bounds would be
+// repeated in every tool definition and cost tokens in every session.
+const HEX_COLOR = /^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/;
+const int = z.number().refine(Number.isInteger, "must be a whole number");
 const color = z
   .string()
-  .regex(/^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/)
-  .describe("Hex color: #rgb, #rgba, #rrggbb or #rrggbbaa");
+  .refine((v) => HEX_COLOR.test(v), "must be a hex color: #rgb, #rgba, #rrggbb or #rrggbbaa")
+  .describe("hex color");
 // Schemas avoid tuples, const and propertyNames: several MCP clients (e.g. Gemini) reject them.
 // The exact shape is checked here instead.
-const int = z.number().int();
 const point = z.array(int).length(2).describe("[x, y]");
 const target = {
   layer: z.string().optional().describe("Layer name (default: active layer)"),
-  frame: z.number().int().min(1).optional().describe("Frame number, 1-based (default: active frame)"),
+  frame: int.min(1).optional().describe("Frame number, 1-based (default: active frame)"),
 };
 const MAX_PIXELS = 65536;
 const rect = z
@@ -297,7 +300,7 @@ const fileSchema = z
   .describe("Absolute path of a .json file with the drawing data (saves tokens for generated art); inline arguments override it");
 const paletteName = z
   .string()
-  .regex(/^[A-Za-z0-9][\w .-]{0,63}$/, "letters, digits, space, _ . - (max 64, starting with a letter or digit)")
+  .refine((v) => /^[A-Za-z0-9][\w .-]{0,63}$/.test(v), "palette names use letters, digits, space, _ . - (max 64, starting with a letter or digit)")
   .describe("Name of a palette saved with aseprite_palette");
 
 const region = z.union([rect, z.enum(["selection"])]);
@@ -771,8 +774,8 @@ const pixelMapFile = z.union([
     .object({
       rows: rowsSchema.optional(),
       palette: mapPalette.optional(),
-      x: z.number().int().optional(),
-      y: z.number().int().optional(),
+      x: int.optional(),
+      y: int.optional(),
       stamps: stampsSchema.optional(),
       place: placeSchema.optional(),
     })
@@ -782,8 +785,8 @@ const pixelMapFile = z.union([
 const animationFrame = z
   .object({
     rows: rowsSchema.optional().describe("Pixel rows for this frame (may be empty = unchanged)"),
-    x: z.number().int().optional(),
-    y: z.number().int().optional(),
+    x: int.optional(),
+    y: int.optional(),
     place: placeSchema.optional(),
     palette: mapPalette.optional().describe("Extra/overriding keys for this frame"),
     duration: z.number().positive().optional().describe("Seconds"),
@@ -810,8 +813,8 @@ const ops = {
     title: "New sprite",
     description: "Creates a new sprite and makes it active. Returns the sprite status.",
     shape: {
-      width: z.number().int().min(1).max(4096),
-      height: z.number().int().min(1).max(4096),
+      width: int.min(1).max(4096),
+      height: int.min(1).max(4096),
       colorMode: z.enum(["rgb", "gray", "indexed"]).default("rgb"),
       background: color.optional().describe("Optional: fill the canvas with this color"),
     },
@@ -829,8 +832,8 @@ const ops = {
       palette: mapPalette.optional().describe("Single character -> hex color (required unless paletteName is given)"),
       paletteName: paletteName.optional(),
       rows: rowsSchema.optional().describe("One string per pixel row, top to bottom"),
-      x: z.number().int().optional().describe("Left edge of the map on the canvas (default 0)"),
-      y: z.number().int().optional().describe("Top edge of the map on the canvas (default 0)"),
+      x: int.optional().describe("Left edge of the map on the canvas (default 0)"),
+      y: int.optional().describe("Top edge of the map on the canvas (default 0)"),
       stamps: stampsSchema.optional(),
       place: placeSchema.optional(),
       file: fileSchema.optional().describe(
@@ -898,10 +901,10 @@ const ops = {
       ]),
       points: z.array(point).min(1).describe("List of [x, y]"),
       color: color.default("#000000"),
-      size: z.number().int().min(1).max(64).default(1).describe("Brush size"),
+      size: int.min(1).max(64).default(1).describe("Brush size"),
       brushType: z.enum(["circle", "square", "line"]).default("circle"),
-      opacity: z.number().int().min(0).max(255).default(255),
-      tolerance: z.number().int().min(0).max(255).optional().describe("paint_bucket only"),
+      opacity: int.min(0).max(255).default(255),
+      tolerance: int.min(0).max(255).optional().describe("paint_bucket only"),
       contiguous: z.boolean().optional().describe("paint_bucket only"),
       pixelPerfect: z.boolean().default(false).describe("Pixel-perfect freehand for pencil"),
       ...target,
@@ -937,7 +940,7 @@ const ops = {
       "To draw several frames at once use aseprite_animation. Returns the sprite status.",
     shape: {
       action: z.enum(["new", "select", "delete", "duration"]),
-      frame: z.number().int().min(1).optional().describe("Frame number (default: active frame); new inserts after it"),
+      frame: int.min(1).optional().describe("Frame number (default: active frame); new inserts after it"),
       copy: z.boolean().default(true).describe("new: copy that frame instead of inserting an empty one"),
       duration: z.number().positive().optional().describe("Seconds, e.g. 0.1"),
     },
@@ -953,11 +956,11 @@ const ops = {
     shape: {
       rect: region.describe('Source [x, y, width, height] or "selection"'),
       fromLayer: z.string().optional().describe("Source layer (default: active layer)"),
-      fromFrame: z.number().int().min(1).optional().describe("Source frame (default: active frame)"),
-      x: z.number().int().optional().describe("Destination left edge (default: source x)"),
-      y: z.number().int().optional().describe("Destination top edge (default: source y)"),
+      fromFrame: int.min(1).optional().describe("Source frame (default: active frame)"),
+      x: int.optional().describe("Destination left edge (default: source x)"),
+      y: int.optional().describe("Destination top edge (default: source y)"),
       layer: z.string().optional().describe("Destination layer (default: fromLayer, else active layer)"),
-      frame: z.number().int().min(1).optional().describe("Destination frame (default: fromFrame, else active frame)"),
+      frame: int.min(1).optional().describe("Destination frame (default: fromFrame, else active frame)"),
       flip: z.enum(["none", "h", "v", "both"]).default("none").describe("h = mirror left/right, v = top/bottom"),
       skipTransparent: z.boolean().default(false).describe("Leave destination pixels alone where the source is transparent"),
     },
@@ -1001,7 +1004,7 @@ const ops = {
       ),
       palette: mapPalette.optional().describe("Palette shared by all frames"),
       paletteName: paletteName.optional(),
-      start: z.number().int().min(1).default(1).describe("Frame number of the first entry"),
+      start: int.min(1).default(1).describe("Frame number of the first entry"),
       copyPrevious: z.boolean().default(true).describe("New frames start as a copy of the previous frame"),
       duration: z.number().positive().optional().describe("Default duration of every drawn frame, in seconds"),
       layer: z.string().optional().describe("Layer name (default: active layer)"),
@@ -1077,7 +1080,7 @@ const ops = {
     description: "Undoes or redoes steps.",
     shape: {
       action: z.enum(["undo", "redo"]),
-      steps: z.number().int().min(1).max(100).default(1),
+      steps: int.min(1).max(100).default(1),
     },
     run: (a) => call("history", a),
   },
@@ -1328,7 +1331,7 @@ tool(
       "changed region: '.' = unchanged, '-' = erased, other keys = new colours. Feed it to aseprite_pixel_map to build on it. " +
       "peek=true looks without moving the baseline; reset=true starts over.",
     inputSchema: {
-      frame: z.number().int().min(1).optional().describe("Frame to compare (default: active frame)"),
+      frame: int.min(1).optional().describe("Frame to compare (default: active frame)"),
       peek: z.boolean().default(false),
       reset: z.boolean().default(false),
       palette: mapPalette.optional().describe("Preferred keys: character -> hex color"),
@@ -1362,11 +1365,11 @@ tool(
       "critique=true instead returns ONE small sheet for self-review: colour, grayscale (value/contrast check), black silhouette " +
       "(readability) and true 1x size; add 'deutan' to panels for a colour-blindness check. Max 128x128 px (or pass rect).",
     inputSchema: {
-      frame: z.number().int().min(1).optional(),
+      frame: int.min(1).optional(),
       rect: region.optional().describe('Only this [x, y, width, height] region or "selection", zoomed in (default: whole canvas)'),
       critique: z.boolean().default(false),
       panels: z.array(z.enum(CRITIQUE_PANELS)).min(1).max(5).optional().describe('critique only (default ["color","gray","silhouette","1x"])'),
-      scale: z.number().int().min(1).max(64).optional().describe("Default: automatic (~512 px)"),
+      scale: int.min(1).max(64).optional().describe("Default: automatic (~512 px)"),
       checker: z.boolean().default(true),
       grid: z.boolean().default(false).describe("Draw a pixel grid (scale 4 or more)"),
     },
