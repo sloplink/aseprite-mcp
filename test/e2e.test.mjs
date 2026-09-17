@@ -82,7 +82,7 @@ test("handshake, commands and Lua permission", { skip }, async () => {
     assert.ok(!r.isError, r.content[0].text);
     const st = JSON.parse(r.content[0].text);
     assert.equal(st.version, "1.3-mock");
-    assert.equal(st.server, st.extension, "plugin reports its version");
+    assert.ok(st.api >= st.requiredApi, "plugin satisfies the server's API level");
     assert.equal(st.warning, undefined);
 
     r = await mcp.callTool({ name: "aseprite_run_lua", arguments: { code: "return 1+1" } });
@@ -201,7 +201,7 @@ test("server ignores and closes unauthenticated clients", { skip: false }, async
 });
 
 // Authenticated Node client that plays Aseprite and records the commands it receives
-async function fakeAseprite(token, port, reply = () => ({}), extension) {
+async function fakeAseprite(token, port, reply = () => ({}), extension, api) {
   const ws = new WebSocket(`ws://127.0.0.1:${port}`);
   const cmds = [];
   let ready = false;
@@ -209,7 +209,7 @@ async function fakeAseprite(token, port, reply = () => ({}), extension) {
     const msg = JSON.parse(m.toString());
     if (msg.type === "challenge") {
       const cn = randomBytes(16).toString("hex");
-      ws.send(JSON.stringify({ type: "hello", v: 2, nonce: cn, extension,
+      ws.send(JSON.stringify({ type: "hello", v: 2, nonce: cn, extension, api,
         mac: createHmac("sha256", token).update(`client|${msg.nonce}|${cn}`).digest("hex") }));
     } else if (msg.type === "welcome") {
       ready = true;
@@ -240,7 +240,7 @@ test("pixel_map, batch and server instructions", async () => {
   try {
     assert.match(mcp.getInstructions() ?? "", /pixel_map/);
     const st = JSON.parse((await mcp.callTool({ name: "aseprite_status", arguments: {} })).content[0].text);
-    assert.match(st.warning, /extension in Aseprite is version < 0\.4\.0/);
+    assert.match(st.warning, /extension in Aseprite \(version < 0\.4\.0\) is too old/);
     const { tools } = await mcp.listTools();
     for (const n of ["aseprite_pixel_map", "aseprite_batch", "aseprite_set_pixels", "aseprite_view"]) {
       assert.ok(tools.some((t) => t.name === n), n);
@@ -556,5 +556,29 @@ test("stamps and drawing data from files", async () => {
     fake.close();
     await mcp.close();
     rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("extension compatibility is judged by API level, not by version", async () => {
+  const cases = [
+    { extension: undefined, api: undefined, warn: true }, // older than 0.4.0
+    { extension: "0.4.0", api: undefined, warn: false }, // 0.4.0 predates the API level
+    { extension: "9.9.9", api: 0, warn: true },
+    { extension: "0.4.0", api: 1, warn: false },
+    { extension: "0.9.0", api: 2, warn: false }, // newer extension, older server
+  ];
+  for (const c of cases) {
+    const token = randomBytes(24).toString("hex");
+    const port = portCounter++;
+    const mcp = await startServer(token, port);
+    const fake = await fakeAseprite(token, port, () => ({ sprite: false }), c.extension, c.api);
+    try {
+      const st = JSON.parse((await mcp.callTool({ name: "aseprite_status", arguments: {} })).content[0].text);
+      assert.equal(st.warning !== undefined, c.warn, JSON.stringify(c) + " -> " + st.warning);
+      assert.equal(st.requiredApi, 1);
+    } finally {
+      fake.close();
+      await mcp.close();
+    }
   }
 });

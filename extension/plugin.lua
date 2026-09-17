@@ -93,6 +93,7 @@ local function handleAuth(sock, msg, token)
       mac = S.hmacHex(token, "client|" .. serverNonce .. "|" .. clientNonce),
       version = tostring(app.version),
       extension = H.VERSION,
+      api = H.API,
     })
     setStatus("Authenticating ...")
 

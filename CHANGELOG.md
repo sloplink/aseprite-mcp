@@ -1,9 +1,15 @@
 # Changelog
 
-Server and Aseprite extension are released together and always carry the same version.
-After updating the extension, restart Aseprite.
+Releases are versioned by the server. The Aseprite extension has its own version and only
+changes when its code changes; `aseprite_status` warns when the installed extension is too
+old for the server. After updating the extension, restart Aseprite.
 
 ## Unreleased
+
+### Changed
+- Server and extension are versioned separately. The extension reports an API level and the
+  server only warns when it needs a newer one, so server-only releases work with the
+  installed extension (0.4.0 counts as API level 1).
 
 ### Added
 - Stamps: `aseprite_pixel_map` and `aseprite_animation` accept `stamps` (reusable pixel maps)

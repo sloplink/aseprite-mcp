@@ -8,8 +8,12 @@ local H = {}
 
 -- Keep in sync with extension/package.json
 local EXTENSION_VERSION = "0.4.0"
+-- Raise when the server starts to rely on a new or changed command here
+-- (and raise REQUIRED_API in server.mjs along with it).
+local API_LEVEL = 1
 
 H.VERSION = EXTENSION_VERSION
+H.API = API_LEVEL
 
 -- Aseprite's json.decode returns userdata objects whose numbers are all floats
 -- (5 -> 5.0, even after assignment). Convert to plain Lua tables with integers.
@@ -186,7 +190,7 @@ end
 -- ---------------------------------------------------------------------------
 function H.info()
   local s = app.sprite
-  local base = { version = tostring(app.version), extension = EXTENSION_VERSION, luaAllowed = H._allowLua() }
+  local base = { version = tostring(app.version), extension = EXTENSION_VERSION, api = API_LEVEL, luaAllowed = H._allowLua() }
   if not s then base.sprite = false; return base end
   local frames = {}
   for i, f in ipairs(s.frames) do frames[i] = f.duration end

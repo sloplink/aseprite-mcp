@@ -43,9 +43,9 @@ Download `aseprite-mcp-bridge.aseprite-extension` from the
 [releases](https://github.com/sloplink/aseprite-mcp/releases) (or build it with `npm run build`),
 then in Aseprite: **Edit › Preferences › Extensions › Add Extension**.
 
-Server and extension share one version number – always update both together, then
-**restart Aseprite** (otherwise the old extension code keeps running).
-`aseprite_status` shows both versions and warns if they differ.
+The extension only needs an update when a release says so – many releases change just the
+server. `aseprite_status` shows both versions and warns if the installed extension is too old.
+After updating the extension, **restart Aseprite** (otherwise the old extension code keeps running).
 
 ### 3. Pairing token
 
@@ -191,19 +191,22 @@ The test suite has three parts:
 |---|---|---|
 | `test/e2e.test.mjs` | real server ⇄ real `plugin.lua` in a mocked Aseprite; server tools against a fake Aseprite | `lua5.4` (or 5.3) + `dkjson` (Debian/Ubuntu: `lua-dkjson`, otherwise `luarocks install dkjson`) for the plugin part |
 | `test/aseprite.test.mjs` | every extension handler inside a real Aseprite in batch mode (`aseprite -b`) | Aseprite; found automatically (PATH, Steam, /Applications) or via `ASEPRITE=/path/to/aseprite` |
-| `test/versions.test.mjs` | server, npm package, extension and CHANGELOG carry the same version | – |
+| `test/versions.test.mjs` | server, npm package and CHANGELOG carry the same version; the extension's version and API level fit the server | – |
 
 Parts whose requirements are missing are skipped. CI runs everything except the real-Aseprite
 test on Node 20–24.
 
 ### Releasing
 
-1. Bump the version in `package.json`, `package-lock.json` (`npm install --package-lock-only`),
-   `extension/package.json`, `server.mjs` (`VERSION`) and `extension/handlers.lua`
-   (`EXTENSION_VERSION`), and add a [CHANGELOG.md](CHANGELOG.md) section – `npm test` fails if
-   any of them differ.
-2. Run `npm test` locally with Aseprite installed.
-3. Push a tag `vX.Y.Z`; the release workflow attaches the built extension to a GitHub release.
+1. Bump the version in `package.json`, `package-lock.json` (`npm install --package-lock-only`)
+   and `server.mjs` (`VERSION`), and add a [CHANGELOG.md](CHANGELOG.md) section.
+2. Only if the extension changed: set its new version in `extension/package.json` and
+   `EXTENSION_VERSION` (`extension/handlers.lua`). If the server now relies on a new or changed
+   extension command, also raise `API_LEVEL` (`extension/handlers.lua`) and `REQUIRED_API`
+   (`server.mjs`) – installed extensions below that level then get a warning.
+   Say in the CHANGELOG whether users need to update the extension.
+3. Run `npm test` locally with Aseprite installed – it fails if these numbers don't fit together.
+4. Push a tag `vX.Y.Z`; the release workflow attaches the built extension to a GitHub release.
 
 ## License
 
