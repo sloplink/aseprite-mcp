@@ -36,7 +36,7 @@ const PALETTE_FILE = process.env.ASEPRITE_MCP_PALETTE_FILE ?? join(CONFIG_DIR, "
 // Directories the `file` option may read from. Default: the system temp directory, plus /tmp on
 // macOS/Linux (on macOS the temp directory is /var/folders/..., but tools often write to /tmp).
 const DEFAULT_FILE_DIRS = [tmpdir(), ...(process.platform === "win32" ? [] : ["/tmp"])].join(delimiter);
-const FILE_DIRS = (process.env.ASEPRITE_MCP_FILE_DIRS ?? DEFAULT_FILE_DIRS).split(delimiter).filter(Boolean);
+const FILE_DIRS = [...new Set((process.env.ASEPRITE_MCP_FILE_DIRS ?? DEFAULT_FILE_DIRS).split(delimiter).filter(Boolean))];
 
 const log = (...a) => console.error("[aseprite-mcp]", ...a);
 
