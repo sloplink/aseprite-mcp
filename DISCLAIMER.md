@@ -14,6 +14,7 @@ All trademarks belong to their respective owners.
 - The AI assistant acts on your open sprites **without asking for confirmation** on each step. It can
   draw over, clear, or delete layers, frames, and pixels.
 - `aseprite_save` and `aseprite_open` can read and **overwrite any file your user account can access**.
+- `aseprite_palette` writes saved palettes to `~/.config/aseprite-mcp/palettes.json`.
 - Changes made in Aseprite appear in the undo history, but saved files cannot be undone that way.
 
 **Save your work and keep backups before connecting an assistant.** The authors are not responsible
@@ -35,8 +36,9 @@ when you don't need it.
 
 ## Data sent to your AI provider
 
-Everything the tools return – sprite information, file paths, and the rendered images from
-`aseprite_view` – is passed to your MCP client and, from there, to your AI provider. Their terms and
+Everything the tools return – sprite information, file paths, the rendered images from
+`aseprite_view` and the pixel data from `aseprite_read_pixels` – is passed to your MCP client
+and, from there, to your AI provider. Their terms and
 privacy policy apply. Do not use this with artwork or files you are not allowed to share.
 
 ## Generated content

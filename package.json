@@ -5,7 +5,7 @@
   "type": "module",
   "main": "server.mjs",
   "bin": { "aseprite-mcp": "server.mjs" },
-  "files": ["server.mjs", "instructions.md", "README.md", "CHANGELOG.md", "LICENSE"],
+  "files": ["server.mjs", "instructions.md", "README.md", "CHANGELOG.md", "DISCLAIMER.md", "LICENSE"],
   "scripts": {
     "start": "node server.mjs",
     "token": "node server.mjs token",
