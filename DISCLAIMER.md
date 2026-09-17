@@ -39,7 +39,8 @@ when you don't need it.
 ## Data sent to your AI provider
 
 Everything the tools return – sprite information, file paths, the rendered images from
-`aseprite_view` and the pixel data from `aseprite_read_pixels` – is passed to your MCP client
+`aseprite_view` and the pixel data from `aseprite_read_pixels` and `aseprite_changes` (what you drew
+yourself) – is passed to your MCP client
 and, from there, to your AI provider. Their terms and
 privacy policy apply. Do not use this with artwork or files you are not allowed to share.
 

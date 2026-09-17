@@ -249,6 +249,46 @@ case("save, export and open", function()
   fails(function() H.open{ path = app.fs.joinPath(tmp, "missing.png") } end, "File not found")
 end)
 
+case("selection", function()
+  H.new_sprite{ width = 8, height = 8 }
+  eq(H.selection{}.empty, true, "no selection")
+  app.sprite.selection = Selection(Rectangle(1, 2, 3, 2))
+  local r = H.selection{}
+  eq(r.empty, false); eq(r.x, 1); eq(r.y, 2); eq(r.width, 3); eq(r.height, 2); eq(r.mask, nil)
+  eq(H.selection{ mask = true }.rectangular, true, "rectangle needs no mask")
+  local sel = Selection(Rectangle(0, 0, 2, 1))
+  sel:add(Rectangle(1, 1, 1, 1))
+  app.sprite.selection = sel
+  r = H.selection{ mask = true }
+  eq(r.rectangular, false); eq(r.mask[1], "##"); eq(r.mask[2], ".#")
+end)
+
+case("watch mode reports only the artist's edits", function()
+  H.new_sprite{ width = 6, height = 4 }
+  eq(H.changes{}.watching, true, "first call starts watching")
+  eq(H.changes{}.changed, 0, "nothing changed yet")
+  -- the assistant's own commands refresh the baseline
+  H.set_pixels{ pixels = { { 0, 0, "#ff0000" } } }
+  H._afterCommand("set_pixels")
+  eq(H.changes{}.changed, 0, "assistant edits are not reported")
+  -- an edit that did not come through a command (the artist)
+  local cel = app.sprite.cels[1]
+  local img = cel.image:clone()
+  img:drawPixel(4 - cel.position.x, 2 - cel.position.y, app.pixelColor.rgba(0, 255, 0, 255))
+  img:drawPixel(0 - cel.position.x, 0 - cel.position.y, app.pixelColor.rgba(0, 0, 0, 0))
+  cel.image = img
+  local c = H.changes{ peek = true }
+  eq(c.changed, 2); eq(c.x, 0); eq(c.y, 0); eq(c.width, 5); eq(c.height, 3)
+  eq(c.rows[1], "00000000" .. string.rep("........", 4), "erased pixel")
+  eq(c.rows[3]:sub(33, 40), "00ff00ff", "new pixel")
+  eq(H.changes{}.changed, 2, "peek keeps the baseline")
+  eq(H.changes{}.changed, 0, "a normal call moves the baseline on")
+  H.frame{ action = "new", frame = 1 }
+  H._afterCommand("frame")
+  eq(H.changes{ frame = 2 }.changed, 0, "new frame is part of the baseline")
+  eq(H.changes{ reset = true }.watching, true)
+end)
+
 case("run_lua permission", function()
   H._allowLua = function() return false end
   fails(function() H.run_lua{ code = "return 1" } end, "disabled")

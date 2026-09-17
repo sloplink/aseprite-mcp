@@ -7,7 +7,7 @@ Aseprite MCP: draw pixel art live in the user's Aseprite. Coordinates are 0-base
 4. Parts that repeat (in one image or across animation frames): define them once as `stamps` and draw them with `place`.
 5. Generated art (you computed the rows with a script): write the data to a `.json` file and pass `file` to `aseprite_pixel_map` / `aseprite_animation` instead of pasting it – the rows then cost no tokens at all.
 6. Use `aseprite_batch` to combine several steps (layer changes, shapes, maps, fills) into ONE call.
-7. `aseprite_view` once to check the result, then fix only the rows that are wrong (pixel_map with `x`/`y` offset and just those rows). Don't re-view after every small change.
+7. Check once: `aseprite_view` with `critique: true` shows colour, grayscale (values), silhouette (readability) and true size in ONE small image – better for judging than a big view. Then fix only the rows that are wrong (pixel_map with `x`/`y` offset). Don't re-view after every small change.
 8. Need exact colors or want to edit an existing image? `aseprite_read_pixels` (optionally with `rect` and your palette) returns the same palette + rows format — edit the rows and send them back with `aseprite_pixel_map`.
 
 ## When to use what
@@ -20,6 +20,9 @@ Aseprite MCP: draw pixel art live in the user's Aseprite. Coordinates are 0-base
 - Animation → `aseprite_animation`: all frames in one call; new frames copy the previous one, so give only the changed rows (x/y offset)
 - Check a small detail → `aseprite_view` with `rect` (zoomed in) instead of the whole image
 - Same colors again (other sprite/session) → save once with `aseprite_palette`, then pass `paletteName` instead of the palette (`list` shows saved ones)
+- Shading colours → `aseprite_palette` action `ramp` (hue-shifted, dark→light keys) instead of guessing hex values
+- Outline → draw flat shapes, then `aseprite_outline` (selective outline by default) instead of drawing outline pixels
+- "this part", "here" → `rect: "selection"` or `aseprite_selection`; drawing together → `aseprite_changes` (first call starts watching, later calls return only the artist's edits)
 - Mistake → `aseprite_history` undo (each tool call and each batch op is its own undo step)
 
 ## pixel_map format

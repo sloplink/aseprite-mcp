@@ -4,6 +4,22 @@ Releases are versioned by the server. The Aseprite extension has its own version
 changes when its code changes; `aseprite_status` warns when the installed extension is too
 old for the server. After updating the extension, restart Aseprite.
 
+## 0.6.0
+
+Needs the MCP Bridge extension **0.6.0** for `aseprite_selection`, `aseprite_changes` and
+`rect: "selection"`; everything else still works with extension 0.4.0.
+
+### Added
+- `aseprite_view` with `critique: true`: one small sheet with colour, grayscale, silhouette,
+  true 1x size and optionally a colour-blindness (deutan) panel, for self-review.
+- `aseprite_selection` and `rect: "selection"` (read_pixels, view, clear, copy, outline,
+  palette from_image): work on whatever the artist has selected.
+- `aseprite_changes`: watch mode – returns only the pixels the artist changed since the last
+  call, as a pixel map (`.` unchanged, `-` erased).
+- `aseprite_palette` action `ramp`: hue-shifted shading ramps from base colours.
+- `aseprite_outline` (also in `aseprite_batch`): selective outline ("sel-out") or a solid
+  outline, outside or inside the shapes.
+
 ## 0.5.0
 
 Server-only release: the MCP Bridge extension stays at **0.4.0** – no need to reinstall it.

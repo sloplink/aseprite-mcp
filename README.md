@@ -105,9 +105,15 @@ The order of steps 1 and 2 does not matter; the bridge reconnects automatically.
 | `aseprite_read_pixels` | Read pixels back as palette + text rows (same format as `pixel_map`) |
 | `aseprite_copy` | Copy or mirror a region to another position, layer or frame |
 | `aseprite_animation` | Draw several frames in one call (creates missing frames, frames can be deltas) |
-| `aseprite_palette` | Save, list and delete named palettes, or collect one from the image; use via `paletteName` |
-| `aseprite_view` | Returns an upscaled PNG so the assistant can see the image (optionally only a zoomed-in `rect`) |
+| `aseprite_palette` | Save, list and delete named palettes, collect one from the image, or build hue-shifted shading ramps; use via `paletteName` |
+| `aseprite_outline` | Selective outline ("sel-out") or solid outline around/inside the shapes |
+| `aseprite_selection` | The region the artist selected; most tools also take `rect: "selection"` |
+| `aseprite_changes` | Watch mode: only the pixels the artist changed since the last call |
+| `aseprite_view` | Returns an upscaled PNG so the assistant can see the image (optionally only a zoomed-in `rect`); `critique: true` gives one small review sheet (colour, grayscale, silhouette, 1x, colour-blindness) |
 | `aseprite_run_lua` | Arbitrary Lua – **off by default**, see below |
+
+Most tools work with the MCP Bridge extension 0.4.0 or newer; `aseprite_selection`,
+`aseprite_changes` and `rect: "selection"` need 0.6.0. The server tells you when an update is needed.
 
 The server also sends a short usage guide ([instructions.md](instructions.md)) to the MCP
 client, so the assistant knows the efficient workflow (pixel map → batch → view once →

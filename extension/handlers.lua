@@ -7,7 +7,7 @@ local pc = app.pixelColor
 local H = {}
 
 -- Keep in sync with extension/package.json
-local EXTENSION_VERSION = "0.4.0"
+local EXTENSION_VERSION = "0.6.0"
 
 H.VERSION = EXTENSION_VERSION
 
@@ -523,6 +523,122 @@ function H.get_pixels(a)
     rows[#rows + 1] = table.concat(parts)
   end
   return { x = x0, y = y0, width = rw, height = rh, frame = fn, layer = layerName, rows = rows }
+end
+
+-- ---------------------------------------------------------------------------
+-- Selection
+-- ---------------------------------------------------------------------------
+local MAX_MASK = 65536
+
+function H.selection(a)
+  local sprite = needSprite()
+  local sel = sprite.selection
+  if sel.isEmpty then return { empty = true } end
+  local b = sel.bounds
+  local out = { empty = false, x = b.x, y = b.y, width = b.width, height = b.height }
+  if a.mask then
+    if b.width * b.height > MAX_MASK then error("Selection too large for a mask (" .. b.width * b.height .. " pixels).") end
+    local rows, full = {}, true
+    for y = b.y, b.y + b.height - 1 do
+      local r = {}
+      for x = b.x, b.x + b.width - 1 do
+        if sel:contains(x, y) then r[#r + 1] = "#" else r[#r + 1] = "."; full = false end
+      end
+      rows[#rows + 1] = table.concat(r)
+    end
+    out.rectangular = full
+    if not full then out.mask = rows end
+  end
+  return out
+end
+
+-- ---------------------------------------------------------------------------
+-- Watch mode: what changed in the sprite since the last look
+-- ---------------------------------------------------------------------------
+-- Flattened copy of every frame of the watched sprite. Refreshed after each command
+-- that the assistant runs, so only the artist's own edits show up as changes.
+local watch = nil -- { sprite = Sprite, frames = { [n] = Image } }
+local MAX_WATCH = 16 * 1024 * 1024 -- pixels over all frames
+
+local function flatten(sprite, fn)
+  local img = Image(sprite.width, sprite.height, ColorMode.RGB)
+  img:drawSprite(sprite, fn)
+  return img
+end
+
+local function snapshotAll(sprite)
+  if sprite.width * sprite.height * #sprite.frames > MAX_WATCH then
+    error("Sprite too large to watch (" .. sprite.width .. "x" .. sprite.height .. ", " .. #sprite.frames .. " frames).")
+  end
+  local frames = {}
+  for i = 1, #sprite.frames do frames[i] = flatten(sprite, i) end
+  watch = { sprite = sprite, frames = frames }
+end
+
+local MODIFYING = {
+  new_sprite = true, open = true, set_pixels = true, draw = true, clear = true,
+  layer = true, frame = true, history = true, run_lua = true,
+}
+
+-- Called by plugin.lua after every command
+function H._afterCommand(name)
+  if watch and MODIFYING[name] and app.sprite then
+    pcall(snapshotAll, app.sprite)
+  end
+end
+
+function H.changes(a)
+  local sprite = needSprite()
+  if a.reset or not watch or watch.sprite ~= sprite then
+    snapshotAll(sprite)
+    return { watching = true, frames = #sprite.frames }
+  end
+  local fn = frameNumber(sprite, a.frame)
+  local old, note = watch.frames[fn], nil
+  if #watch.frames ~= #sprite.frames then
+    note = "frame count changed: " .. #watch.frames .. " -> " .. #sprite.frames
+  end
+  local cur = flatten(sprite, fn)
+  if not old or old.width ~= cur.width or old.height ~= cur.height then
+    if not a.peek then snapshotAll(sprite) end
+    return { frame = fn, changed = -1, note = note or "canvas size changed; read the sprite again" }
+  end
+  local x0, y0, x1, y1, count = math.huge, math.huge, -1, -1, 0
+  for y = 0, cur.height - 1 do
+    for x = 0, cur.width - 1 do
+      if cur:getPixel(x, y) ~= old:getPixel(x, y) then
+        count = count + 1
+        if x < x0 then x0 = x end
+        if x > x1 then x1 = x end
+        if y < y0 then y0 = y end
+        if y > y1 then y1 = y end
+      end
+    end
+  end
+  local out = { frame = fn, changed = count, note = note }
+  if count > 0 then
+    out.x, out.y, out.width, out.height = x0, y0, x1 - x0 + 1, y1 - y0 + 1
+    if out.width * out.height > MAX_READ then
+      out.note = "changed region too large to list; use aseprite_read_pixels with rect"
+    else
+      local fmt, rows = string.format, {}
+      for y = y0, y1 do
+        local parts = {}
+        for x = x0, x1 do
+          local v = cur:getPixel(x, y)
+          if v == old:getPixel(x, y) then
+            parts[#parts + 1] = "........"
+          else
+            parts[#parts + 1] = fmt("%02x%02x%02x%02x", pc.rgbaR(v), pc.rgbaG(v), pc.rgbaB(v), pc.rgbaA(v))
+          end
+        end
+        rows[#rows + 1] = table.concat(parts)
+      end
+      out.rows = rows
+    end
+  end
+  if not a.peek then snapshotAll(sprite) end
+  return out
 end
 
 function H.run_lua(a)

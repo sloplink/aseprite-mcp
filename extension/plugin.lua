@@ -68,6 +68,7 @@ local function handleCommand(sock, msg)
     else
       reply = { id = msg.id, ok = false, error = cleanError(res) }
     end
+    pcall(H._afterCommand, name)
     app.refresh()
   end
   local okSend, err = pcall(send, sock, reply)

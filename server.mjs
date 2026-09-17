@@ -18,8 +18,9 @@ import { readFile, writeFile, mkdir, unlink, chmod, rename, stat } from "node:fs
 import { homedir, tmpdir } from "node:os";
 import { join, dirname, isAbsolute } from "node:path";
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from "node:crypto";
+import { deflateSync } from "node:zlib";
 
-const VERSION = "0.5.0";
+const VERSION = "0.6.0";
 const PROTOCOL = 2;
 // Oldest extension that has every command this server uses. Server-only releases keep it,
 // so they work with the installed extension.
@@ -187,6 +188,14 @@ function compareVersions(a, b) {
   return 0;
 }
 
+function requireExtension(min, feature) {
+  if (compareVersions(extensionVersion, min) >= 0) return;
+  throw new Error(
+    `${feature} needs the MCP Bridge extension ${min} or newer (installed: ${extensionVersion ?? "< 0.4.0"}). ` +
+      "Install it from the latest release and restart Aseprite."
+  );
+}
+
 function versionWarning() {
   if (compareVersions(extensionVersion, MIN_EXTENSION) >= 0) return null;
   return (
@@ -272,6 +281,17 @@ const paletteName = z
   .string()
   .regex(/^[A-Za-z0-9][\w .-]{0,63}$/, "letters, digits, space, _ . - (max 64, starting with a letter or digit)")
   .describe("Name of a palette saved with aseprite_palette");
+
+const region = z.union([rect, z.literal("selection")]);
+
+// "selection" -> bounding box of the artist's current selection
+async function resolveRect(r) {
+  if (r !== "selection") return r;
+  requireExtension("0.6.0", 'rect "selection"');
+  const sel = await call("selection", {});
+  if (sel.empty) throw new Error("Nothing is selected in Aseprite.");
+  return [sel.x, sel.y, sel.width, sel.height];
+}
 
 // Pixel map (palette + text rows) -> [x, y, color] list for set_pixels
 const SKIP_CHARS = new Set([".", " "]);
@@ -377,21 +397,30 @@ function normHex(c) {
 }
 const shortHex = (h) => "#" + (h.endsWith("ff") ? h.slice(0, 6) : h);
 
-function hexRowsToPixelMap(rawRows, preferred = {}) {
+// eraseKey: write fully transparent pixels with this key (for diffs) instead of '.';
+// "........" always means "unchanged" and becomes '.'.
+function hexRowsToPixelMap(rawRows, preferred = {}, { eraseKey } = {}) {
   const keyOf = new Map(); // rrggbbaa -> key
-  for (const [k, c] of Object.entries(preferred)) {
+  for (const [k, c] of Object.entries(preferred ?? {})) {
     const h = normHex(c);
-    if (!SKIP_CHARS.has(k) && !h.endsWith("00") && !keyOf.has(h)) keyOf.set(h, k);
+    if (!SKIP_CHARS.has(k) && k !== eraseKey && !h.endsWith("00") && !keyOf.has(h)) keyOf.set(h, k);
   }
   const taken = new Set(keyOf.values());
-  const free = MAP_KEYS.filter((k) => !taken.has(k));
+  const free = MAP_KEYS.filter((k) => !taken.has(k) && k !== eraseKey);
   const palette = {};
   const rows = rawRows.map((raw) => {
     let row = "";
     for (let i = 0; i < raw.length; i += 8) {
       const h = raw.slice(i, i + 8);
-      if (h.endsWith("00")) {
+      if (h === "........") {
         row += ".";
+        continue;
+      }
+      if (h.endsWith("00")) {
+        if (eraseKey) {
+          palette[eraseKey] = "#00000000";
+          row += eraseKey;
+        } else row += ".";
         continue;
       }
       let k = keyOf.get(h);
@@ -453,6 +482,179 @@ async function getPixels(args) {
 }
 
 const splitHex = (row) => row.match(/.{8}/g) ?? [];
+
+// --- colour helpers --------------------------------------------------------
+const hexToRgba = (c) => {
+  const h = normHex(c);
+  return [0, 2, 4, 6].map((i) => parseInt(h.slice(i, i + 2), 16));
+};
+const rgbaToHex = ([r, g, b, a = 255]) =>
+  "#" + [r, g, b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("") + (a === 255 ? "" : a.toString(16).padStart(2, "0"));
+
+function rgbToHsl(r, g, b) {
+  [r, g, b] = [r / 255, g / 255, b / 255];
+  const max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2;
+  if (max === min) return [0, 0, l];
+  const d = max - min;
+  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
+  const h = max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
+  return [h * 60, s, l];
+}
+
+function hslToRgb(h, s, l) {
+  h = ((h % 360) + 360) % 360;
+  const c = (1 - Math.abs(2 * l - 1)) * s, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = l - c / 2;
+  const [r, g, b] = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x] : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
+  return [r, g, b].map((v) => Math.round((v + m) * 255));
+}
+
+const clamp01 = (v) => Math.min(1, Math.max(0, v));
+// turn hue h towards target by at most deg degrees
+function hueToward(h, target, deg) {
+  const diff = ((target - h + 540) % 360) - 180;
+  return h + Math.sign(diff) * Math.min(Math.abs(diff), deg);
+}
+const SHADOW_HUE = 250; // cool shadows
+const LIGHT_HUE = 55; // warm highlights
+
+// Hue-shifted ramp, dark -> light, with the base colour in the middle
+function rampColors(base, n, shift = 20) {
+  const [r, g, b] = hexToRgba(base);
+  const [h, s, l] = rgbToHsl(r, g, b);
+  const mid = Math.floor((n - 1) / 2);
+  return Array.from({ length: n }, (_, i) => {
+    if (i === mid) return rgbaToHex([r, g, b]);
+    if (i < mid) {
+      const k = (mid - i) / mid;
+      return rgbaToHex(hslToRgb(hueToward(h, SHADOW_HUE, shift * k), clamp01(s + 0.12 * k), l - (l - 0.08) * 0.85 * k));
+    }
+    const k = (i - mid) / (n - 1 - mid);
+    return rgbaToHex(hslToRgb(hueToward(h, LIGHT_HUE, shift * k), clamp01(s - 0.15 * k), l + (0.96 - l) * 0.8 * k));
+  });
+}
+
+// --- PNG (RGBA, no dependencies) --------------------------------------------
+const CRC_TABLE = Array.from({ length: 256 }, (_, n) => {
+  let c = n;
+  for (let k = 0; k < 8; k++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+  return c >>> 0;
+});
+function crc32(buf) {
+  let c = 0xffffffff;
+  for (const b of buf) c = CRC_TABLE[(c ^ b) & 0xff] ^ (c >>> 8);
+  return (c ^ 0xffffffff) >>> 0;
+}
+function encodePng(width, height, rgba) {
+  const raw = Buffer.alloc((width * 4 + 1) * height);
+  for (let y = 0; y < height; y++) rgba.copy(raw, y * (width * 4 + 1) + 1, y * width * 4, (y + 1) * width * 4);
+  const chunk = (type, data) => {
+    const head = Buffer.alloc(8);
+    head.writeUInt32BE(data.length, 0);
+    head.write(type, 4, "ascii");
+    const crc = Buffer.alloc(4);
+    crc.writeUInt32BE(crc32(Buffer.concat([head.subarray(4), data])), 0);
+    return Buffer.concat([head, data, crc]);
+  };
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(width, 0);
+  ihdr.writeUInt32BE(height, 4);
+  ihdr.set([8, 6, 0, 0, 0], 8);
+  return Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    chunk("IHDR", ihdr),
+    chunk("IDAT", deflateSync(raw)),
+    chunk("IEND", Buffer.alloc(0)),
+  ]);
+}
+
+// rows of "rrggbbaa" -> [[r,g,b,a], ...] per row
+const parseHexGrid = (rows) => rows.map((row) => splitHex(row).map((h) => [0, 2, 4, 6].map((i) => parseInt(h.slice(i, i + 2), 16))));
+
+// --- critique sheet ---------------------------------------------------------
+const CRITIQUE_PANELS = ["color", "gray", "silhouette", "deutan", "1x"];
+const PANEL_GAP = 4;
+const DEUTAN = [
+  [0.625, 0.375, 0],
+  [0.7, 0.3, 0],
+  [0, 0.3, 0.7],
+];
+
+function critiqueSheet(grid, panels, scale) {
+  const h = grid.length, w = grid[0]?.length ?? 0;
+  const sizes = panels.map((p) => (p === "1x" ? 1 : scale));
+  const W = sizes.reduce((sum, s) => sum + w * s, 0) + PANEL_GAP * (panels.length + 1);
+  const H = Math.max(...sizes) * h + PANEL_GAP * 2;
+  const out = Buffer.alloc(W * H * 4, 0);
+  for (let i = 0; i < W * H; i++) out.set([96, 96, 104, 255], i * 4);
+  let ox = PANEL_GAP;
+  panels.forEach((p, idx) => {
+    const s = sizes[idx], cell = Math.max(2, Math.floor(s / 2)) * (s === 1 ? 2 : 1);
+    for (let py = 0; py < h * s; py++) {
+      for (let px = 0; px < w * s; px++) {
+        let [r, g, b, a] = grid[Math.floor(py / s)][Math.floor(px / s)];
+        let bg = (Math.floor(px / cell) + Math.floor(py / cell)) % 2 ? [204, 204, 204] : [255, 255, 255];
+        if (p === "gray") r = g = b = 0.299 * r + 0.587 * g + 0.114 * b;
+        else if (p === "deutan") [r, g, b] = DEUTAN.map(([x, y, z]) => x * r + y * g + z * b);
+        else if (p === "silhouette") {
+          bg = [255, 255, 255];
+          r = g = b = 0;
+        }
+        const t = a / 255;
+        const o = ((PANEL_GAP + py) * W + ox + px) * 4;
+        out.set([r * t + bg[0] * (1 - t), g * t + bg[1] * (1 - t), b * t + bg[2] * (1 - t)].map(Math.round), o);
+      }
+    }
+    ox += w * s + PANEL_GAP;
+  });
+  return { png: encodePng(W, H, out), width: W, height: H };
+}
+
+// --- selective outline ------------------------------------------------------
+function outlinePixels(grid, { style, color, position, strength, bounds }) {
+  const h = grid.length, w = grid[0]?.length ?? 0;
+  const alpha = (x, y) => (x < 0 || y < 0 || x >= w || y >= h ? 0 : grid[y][x][3]);
+  const solid = (x, y) => alpha(x, y) >= 128;
+  const N4 = [[1, 0], [-1, 0], [0, 1], [0, -1]];
+  const N8 = [...N4, [1, 1], [-1, 1], [1, -1], [-1, -1]];
+  const isTarget = (x, y) =>
+    position === "outside"
+      ? alpha(x, y) === 0 && N4.some(([dx, dy]) => solid(x + dx, y + dy))
+      : solid(x, y) && N4.some(([dx, dy]) => !solid(x + dx, y + dy));
+  const inBounds = (x, y) => !bounds || (x >= bounds[0] && y >= bounds[1] && x < bounds[0] + bounds[2] && y < bounds[1] + bounds[3]);
+  const fixed = color ? rgbaToHex(hexToRgba(color)) : "#1b1b2a";
+  const pixels = [];
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      if (!inBounds(x, y) || !isTarget(x, y)) continue;
+      if (style === "solid") {
+        pixels.push([x, y, fixed]);
+        continue;
+      }
+      // the fill this outline pixel belongs to: most common solid neighbour that is not itself an edge
+      const counts = new Map();
+      let sx = 0, sy = 0;
+      for (const [dx, dy] of N8) {
+        const nx = x + dx, ny = y + dy;
+        if (!solid(nx, ny) || (position === "inside" && isTarget(nx, ny))) continue;
+        const key = grid[ny][nx].slice(0, 3).join(",");
+        counts.set(key, (counts.get(key) ?? 0) + 1);
+        sx += dx;
+        sy += dy;
+      }
+      if (!counts.size) {
+        if (position === "inside") counts.set(grid[y][x].slice(0, 3).join(","), 1);
+        else continue;
+      }
+      const [r, g, b] = [...counts.entries()].sort((p, q) => q[1] - p[1])[0][0].split(",").map(Number);
+      const [hh, ss, ll] = rgbToHsl(r, g, b);
+      const lit = sx + sy > 0; // the shape lies right/below: this edge faces the light (top-left)
+      const dark = lit ? strength * 0.55 : strength;
+      const hue = lit ? hh : hueToward(hh, SHADOW_HUE, 15);
+      pixels.push([x, y, rgbaToHex(hslToRgb(hue, clamp01(ss + 0.08), ll * (1 - dark)))]);
+    }
+  }
+  return pixels;
+}
 
 const pixelMapFile = z.union([
   rowsSchema,
@@ -596,13 +798,10 @@ const ops = {
     title: "Clear",
     description: "Clears the whole layer in the frame, or only a rectangle.",
     shape: {
-      rect: z
-        .tuple([z.number().int(), z.number().int(), z.number().int().min(1), z.number().int().min(1)])
-        .optional()
-        .describe("[x, y, width, height]"),
+      rect: region.optional().describe('[x, y, width, height] or "selection" (its bounding box)'),
       ...target,
     },
-    run: (a) => call("clear", a),
+    run: async (a) => call("clear", { ...a, rect: await resolveRect(a.rect) }),
   },
   layer: {
     title: "Manage layers",
@@ -638,7 +837,7 @@ const ops = {
       "Without x/y it writes back in place, so flip='h' mirrors the region where it is. " +
       "Symmetry example on a 16px-wide sprite: rect [0,0,8,16], flip 'h', x 8 mirrors the left half onto the right half.",
     shape: {
-      rect: rect.describe("Source [x, y, width, height]"),
+      rect: region.describe('Source [x, y, width, height] or "selection"'),
       fromLayer: z.string().optional().describe("Source layer (default: active layer)"),
       fromFrame: z.number().int().min(1).optional().describe("Source frame (default: active frame)"),
       x: z.number().int().optional().describe("Destination left edge (default: source x)"),
@@ -649,6 +848,7 @@ const ops = {
       skipTransparent: z.boolean().default(false).describe("Leave destination pixels alone where the source is transparent"),
     },
     run: async ({ rect: r, fromLayer, fromFrame, x, y, layer, frame, flip, skipTransparent }) => {
+      r = await resolveRect(r);
       const src = await getPixels({ rect: r, layer: fromLayer, frame: fromFrame });
       let grid = src.rows.map(splitHex);
       if (flip === "h" || flip === "both") grid = grid.map((row) => row.reverse());
@@ -726,6 +926,35 @@ const ops = {
       }
       await call("frame", { action: "select", frame: start });
       return call("info");
+    },
+  },
+  outline: {
+    title: "Outline",
+    description:
+      "Adds a 1px outline around (outside) or on the edge of (inside) everything opaque on a layer, in one undo step. " +
+      "style 'selout' (default) derives each outline pixel from the colour it borders: darker and cooler on the shadow side, " +
+      "lighter on the side facing the top-left light – the classic selective outline. style 'solid' uses one colour. " +
+      "Works on sprites up to 128x128 (or pass rect). Semi-transparent pixels (alpha < 128) count as empty.",
+    shape: {
+      style: z.enum(["selout", "solid"]).default("selout"),
+      color: color.optional().describe("solid only (default #1b1b2a)"),
+      position: z.enum(["outside", "inside"]).default("outside"),
+      strength: z.number().min(0).max(1).default(0.6).describe("selout: how much darker than the fill"),
+      rect: region.optional().describe('Only outline inside [x, y, width, height] or "selection"'),
+      ...target,
+    },
+    run: async ({ style, color: c, position, strength, rect: r, layer, frame }) => {
+      const bounds = await resolveRect(r);
+      const src = await getPixels({ layer, frame });
+      const grid = parseHexGrid(src.rows);
+      const local = bounds && [bounds[0] - src.x, bounds[1] - src.y, bounds[2], bounds[3]];
+      const pixels = outlinePixels(grid, { style, color: c, position, strength, bounds: local }).map(([x, y, col]) => [
+        x + src.x,
+        y + src.y,
+        col,
+      ]);
+      if (!pixels.length) return { drawn: 0 };
+      return call("set_pixels", { pixels, layer: layer ?? src.layer, frame: frame ?? src.frame });
     },
   },
   history: {
@@ -847,7 +1076,7 @@ tool(
       "Without layer the visible, flattened frame is read; with layer only that layer. " +
       "Pass the palette (or paletteName) you drew with to get the same keys back. Max 16384 pixels per call.",
     inputSchema: {
-      rect: rect.optional().describe("[x, y, width, height] (default: whole canvas)"),
+      rect: region.optional().describe('[x, y, width, height] or "selection" (default: whole canvas)'),
       palette: mapPalette.optional().describe("Preferred keys: character -> hex color"),
       paletteName: paletteName.optional(),
       ...target,
@@ -856,7 +1085,7 @@ tool(
   },
   async ({ palette, paletteName, ...args }) => {
     const preferred = await resolvePalette({ palette, paletteName });
-    const res = await getPixels({ ...args, flatten: !args.layer });
+    const res = await getPixels({ ...args, rect: await resolveRect(args.rect), flatten: !args.layer });
     const out = { x: res.x, y: res.y, w: res.width, h: res.height, frame: res.frame };
     if (res.layer) out.layer = res.layer;
     return asText({ ...out, ...hexRowsToPixelMap(res.rows, preferred) });
@@ -871,16 +1100,46 @@ tool(
       "Stores named palettes (character -> color) on disk so they can be reused across sprites and sessions via " +
       "paletteName in aseprite_pixel_map, aseprite_read_pixels, aseprite_animation. " +
       "Actions: save (name + colors), list (all saved palettes), delete (name), " +
-      "from_image (name; collects the colors of the visible frame, or of layer/rect, and saves them with generated keys).",
+      "from_image (name; collects the colors of the visible frame, or of layer/rect, and saves them with generated keys), " +
+      "ramp (builds hue-shifted shading ramps – cool, saturated shadows and warm highlights – from base colours; " +
+      'e.g. ramps [{"base":"#d63a3a","keys":"DmrRH"}] gives 5 keys dark->light with the base in the middle; saved when name is given).',
     inputSchema: {
-      action: z.enum(["save", "list", "delete", "from_image"]),
-      name: paletteName.optional().describe("Palette name (not needed for list)"),
+      action: z.enum(["save", "list", "delete", "from_image", "ramp"]),
+      name: paletteName.optional().describe("Palette name (not needed for list; optional for ramp)"),
       colors: mapPalette.optional().describe("save only: character -> hex color"),
-      rect: rect.optional().describe("from_image only"),
+      ramps: z
+        .array(
+          z
+            .object({
+              base: color,
+              keys: z.string().min(2).max(9).describe("One key per step, dark -> light"),
+              shift: z.number().min(0).max(90).optional().describe("Max hue shift in degrees (default 20)"),
+            })
+            .strict()
+        )
+        .min(1)
+        .max(16)
+        .optional()
+        .describe("ramp only"),
+      rect: region.optional().describe("from_image only"),
       ...target,
     },
   },
-  async ({ action, name, colors, rect: r, layer, frame }) => {
+  async ({ action, name, colors, ramps, rect: r, layer, frame }) => {
+    if (action === "ramp") {
+      if (!ramps?.length) throw new Error("ramps is required for ramp.");
+      const palette = {};
+      for (const { base, keys, shift } of ramps) {
+        const ks = Array.from(keys);
+        if (ks.some((k) => SKIP_CHARS.has(k))) throw new Error(`'.' and space cannot be palette keys.`);
+        rampColors(base, ks.length, shift).forEach((c, i) => (palette[ks[i]] = c));
+      }
+      if (!name) return asText(palette);
+      const all = await loadPalettes();
+      all[name] = palette;
+      await storePalettes(all);
+      return asText({ saved: name, palette });
+    }
     const all = await loadPalettes();
     if (action === "list") return asText(all);
     if (!name) throw new Error(`name is required for ${action}.`);
@@ -896,11 +1155,65 @@ tool(
       if (bad.length) throw new Error(`'.' and space cannot be palette keys.`);
       all[name] = colors;
     } else {
-      const res = await getPixels({ rect: r, layer, frame, flatten: !layer });
+      const res = await getPixels({ rect: await resolveRect(r), layer, frame, flatten: !layer });
       all[name] = hexRowsToPixelMap(res.rows).palette;
     }
     await storePalettes(all);
     return asText({ saved: name, palette: all[name] });
+  }
+);
+
+tool(
+  "aseprite_selection",
+  {
+    title: "Artist's selection",
+    description:
+      "Returns the region the artist has selected in Aseprite ({empty:true} if nothing is selected), so a request like " +
+      "'improve this part' needs no coordinates. Most tools also accept rect \"selection\" directly. " +
+      "mask=true adds the exact shape as rows ('#' selected) when it is not a plain rectangle.",
+    inputSchema: { mask: z.boolean().default(false) },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ mask }) => {
+    requireExtension("0.6.0", "aseprite_selection");
+    const s = await call("selection", { mask });
+    if (s.empty) return asText({ empty: true });
+    const out = { x: s.x, y: s.y, w: s.width, h: s.height };
+    if (s.mask) out.mask = s.mask.map((r) => r.replace(/\.+$/, ""));
+    return asText(out);
+  }
+);
+
+tool(
+  "aseprite_changes",
+  {
+    title: "What the artist changed",
+    description:
+      "Watch mode for drawing together. The first call starts watching the active sprite. Later calls return only the " +
+      "pixels the ARTIST changed since the previous call (your own tool calls are not reported), as a pixel map of the " +
+      "changed region: '.' = unchanged, '-' = erased, other keys = new colours. Feed it to aseprite_pixel_map to build on it. " +
+      "peek=true looks without moving the baseline; reset=true starts over.",
+    inputSchema: {
+      frame: z.number().int().min(1).optional().describe("Frame to compare (default: active frame)"),
+      peek: z.boolean().default(false),
+      reset: z.boolean().default(false),
+      palette: mapPalette.optional().describe("Preferred keys: character -> hex color"),
+      paletteName: paletteName.optional(),
+    },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ palette, paletteName, ...args }) => {
+    requireExtension("0.6.0", "aseprite_changes");
+    const res = await call("changes", args);
+    if (res.watching) return asText({ watching: true, frames: res.frames });
+    const out = { frame: res.frame, changed: res.changed };
+    if (res.note) out.note = res.note;
+    if (res.changed > 0) Object.assign(out, { x: res.x, y: res.y, w: res.width, h: res.height });
+    if (res.rows) {
+      const preferred = await resolvePalette({ palette, paletteName });
+      Object.assign(out, hexRowsToPixelMap(res.rows, preferred, { eraseKey: "-" }));
+    }
+    return asText(out);
   }
 );
 
@@ -910,17 +1223,37 @@ tool(
     title: "View image",
     description:
       "Renders the visible, flattened frame as an upscaled PNG so you can look at and check the result yourself. Transparency is shown as a checkerboard. " +
-      "Use rect to zoom into a detail. Call it once after a drawing pass, not after every step.",
+      "Use rect to zoom into a detail. Call it once after a drawing pass, not after every step. " +
+      "critique=true instead returns ONE small sheet for self-review: colour, grayscale (value/contrast check), black silhouette " +
+      "(readability) and true 1x size; add 'deutan' to panels for a colour-blindness check. Max 128x128 px (or pass rect).",
     inputSchema: {
       frame: z.number().int().min(1).optional(),
-      rect: rect.optional().describe("Only this [x, y, width, height] region, zoomed in (default: whole canvas)"),
+      rect: region.optional().describe('Only this [x, y, width, height] region or "selection", zoomed in (default: whole canvas)'),
+      critique: z.boolean().default(false),
+      panels: z.array(z.enum(CRITIQUE_PANELS)).min(1).max(5).optional().describe('critique only (default ["color","gray","silhouette","1x"])'),
       scale: z.number().int().min(1).max(64).optional().describe("Default: automatic (~512 px)"),
       checker: z.boolean().default(true),
       grid: z.boolean().default(false).describe("Draw a pixel grid (scale 4 or more)"),
     },
     annotations: { readOnlyHint: true },
   },
-  async (a) => {
+  async ({ critique, panels, ...a }) => {
+    a.rect = await resolveRect(a.rect);
+    if (critique) {
+      const res = await getPixels({ rect: a.rect, frame: a.frame, flatten: true });
+      const grid = parseHexGrid(res.rows);
+      const w = res.width, h = res.height;
+      const scale = a.scale ?? Math.max(1, Math.min(16, Math.floor(192 / Math.max(w, h))));
+      const list = panels ?? ["color", "gray", "silhouette", "1x"];
+      const sheet = critiqueSheet(grid, list, scale);
+      const colors = new Set(grid.flat().filter((p) => p[3] > 0).map((p) => p.join(","))).size;
+      return {
+        content: [
+          { type: "image", data: sheet.png.toString("base64"), mimeType: "image/png" },
+          { type: "text", text: JSON.stringify({ panels: list, scale, rect: [res.x, res.y, w, h], colors, frame: res.frame }) },
+        ],
+      };
+    }
     const path = join(tmpdir(), `aseprite-mcp-${randomUUID()}.png`);
     try {
       const info = await call("snapshot", { ...a, path });

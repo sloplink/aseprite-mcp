@@ -581,3 +581,99 @@ test("extension compatibility is judged by a minimum version", async () => {
     }
   }
 });
+
+test("critique sheet, selection, watch mode, ramps and outline", async () => {
+  const token = randomBytes(24).toString("hex");
+  const port = portCounter++;
+  const mcp = await startServer(token, port);
+  // 3x2 layer: red, empty, blue / empty, green, empty
+  const layerRows = ["ff0000ff" + "00000000" + "0000ffff", "00000000" + "00ff00ff" + "00000000"];
+  const fake = await fakeAseprite(token, port, (msg) => {
+    const a = msg.args;
+    if (msg.cmd === "get_pixels") {
+      if (a.rect) return { x: a.rect[0], y: a.rect[1], width: 1, height: 1, frame: 1, rows: ["ff0000ff"] };
+      return { x: 0, y: 0, width: 3, height: 2, frame: 1, layer: a.flatten ? undefined : "L", rows: layerRows };
+    }
+    if (msg.cmd === "selection") return a.mask ? { empty: false, x: 1, y: 0, width: 2, height: 2, mask: ["##", ".#."] } : { empty: false, x: 1, y: 0, width: 2, height: 2 };
+    if (msg.cmd === "changes") {
+      if (a.reset) return { watching: true, frames: 1 };
+      return { frame: 1, changed: 3, x: 4, y: 5, width: 3, height: 1, rows: ["ff0000ff" + "........" + "00000000"] };
+    }
+    if (msg.cmd === "set_pixels") return { drawn: a.pixels.length };
+    return {};
+  }, "0.6.0");
+  const ok = async (name, args) => {
+    const r = await mcp.callTool({ name, arguments: args });
+    assert.ok(!r.isError, r.content[0].text);
+    return r;
+  };
+  const json = async (name, args) => JSON.parse((await ok(name, args)).content.at(-1).text);
+  try {
+    // critique: one PNG, panels side by side
+    const r = await ok("aseprite_view", { critique: true, scale: 4 });
+    assert.equal(r.content.length, 2);
+    const png = Buffer.from(r.content[0].data, "base64");
+    assert.equal(png.subarray(1, 4).toString(), "PNG");
+    const W = png.readUInt32BE(16), H = png.readUInt32BE(20);
+    // 3 panels of 12x8 + one 1x panel of 3x2 + 5 gaps of 4px; height 8 + 2 gaps
+    assert.deepEqual([W, H], [12 * 3 + 3 + 4 * 5, 8 + 8]);
+    const meta = JSON.parse(r.content[1].text);
+    assert.deepEqual(meta, { panels: ["color", "gray", "silhouette", "1x"], scale: 4, rect: [0, 0, 3, 2], colors: 3, frame: 1 });
+    assert.equal(fake.cmds.at(-1).args.flatten, true);
+
+    // "selection" as rect
+    await ok("aseprite_read_pixels", { rect: "selection" });
+    assert.deepEqual(fake.cmds.at(-1).args.rect, [1, 0, 2, 2]);
+    await ok("aseprite_clear", { rect: "selection" });
+    assert.deepEqual(fake.cmds.at(-1).args, { rect: [1, 0, 2, 2] });
+    assert.deepEqual(await json("aseprite_selection", {}), { x: 1, y: 0, w: 2, h: 2 });
+    assert.deepEqual((await json("aseprite_selection", { mask: true })).mask, ["##", ".#"]);
+
+    // watch mode: '.' unchanged, '-' erased
+    assert.deepEqual(await json("aseprite_changes", { reset: true }), { watching: true, frames: 1 });
+    const ch = await json("aseprite_changes", { palette: { R: "#f00", "-": "#123" } });
+    assert.deepEqual(ch, { frame: 1, changed: 3, x: 4, y: 5, w: 3, h: 1, palette: { R: "#ff0000", "-": "#00000000" }, rows: ["R.-"] });
+
+    // ramps: dark -> light, base in the middle, saved on request
+    const ramp = await json("aseprite_palette", { action: "ramp", ramps: [{ base: "#d63a3a", keys: "abcde" }] });
+    assert.deepEqual(Object.keys(ramp), ["a", "b", "c", "d", "e"]);
+    assert.equal(ramp.c, "#d63a3a");
+    const lum = (h) => { const n = parseInt(h.slice(1, 7), 16); return 0.299 * (n >> 16) + 0.587 * ((n >> 8) & 255) + 0.114 * (n & 255); };
+    const ls = Object.values(ramp).map(lum);
+    assert.ok(ls.every((v, i) => i === 0 || v > ls[i - 1]), "gets lighter: " + ls);
+    const rb = (h) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(5, 7), 16)];
+    assert.ok(rb(ramp.a)[1] / (rb(ramp.a)[0] + 1) > 58 / 214, "shadows turn cooler");
+
+    // outline: selout around the shapes, one set_pixels call
+    await ok("aseprite_outline", {});
+    let px = fake.cmds.at(-1).args.pixels;
+    assert.equal(fake.cmds.at(-1).args.layer, "L");
+    assert.deepEqual(px.map(([x, y]) => `${x},${y}`).sort(), ["0,1", "1,0", "2,1"].sort());
+    const green = px.find(([x, y]) => x === 2 && y === 1)[2];
+    assert.notEqual(green, "#00ff00");
+    await ok("aseprite_outline", { style: "solid", color: "#000", position: "inside", rect: [0, 0, 1, 2] });
+    px = fake.cmds.at(-1).args.pixels;
+    assert.deepEqual(px, [[0, 0, "#000000"]]);
+  } finally {
+    fake.close();
+    await mcp.close();
+  }
+});
+
+test("new tools explain when the extension is too old", async () => {
+  const token = randomBytes(24).toString("hex");
+  const port = portCounter++;
+  const mcp = await startServer(token, port);
+  const fake = await fakeAseprite(token, port, () => ({}), "0.4.0");
+  try {
+    for (const [name, args] of [["aseprite_selection", {}], ["aseprite_changes", {}], ["aseprite_read_pixels", { rect: "selection" }]]) {
+      const r = await mcp.callTool({ name, arguments: args });
+      assert.ok(r.isError, name);
+      assert.match(r.content[0].text, /needs the MCP Bridge extension 0\.6\.0 or newer \(installed: 0\.4\.0\)/);
+    }
+    assert.equal(fake.cmds.length, 0, "nothing is sent to an old extension");
+  } finally {
+    fake.close();
+    await mcp.close();
+  }
+});
