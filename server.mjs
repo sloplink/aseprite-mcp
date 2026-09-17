@@ -491,21 +491,47 @@ const hexToRgba = (c) => {
 const rgbaToHex = ([r, g, b, a = 255]) =>
   "#" + [r, g, b].map((v) => Math.round(v).toString(16).padStart(2, "0")).join("") + (a === 255 ? "" : a.toString(16).padStart(2, "0"));
 
-function rgbToHsl(r, g, b) {
-  [r, g, b] = [r / 255, g / 255, b / 255];
-  const max = Math.max(r, g, b), min = Math.min(r, g, b), l = (max + min) / 2;
-  if (max === min) return [0, 0, l];
-  const d = max - min;
-  const s = l > 0.5 ? d / (2 - max - min) : d / (max + min);
-  const h = max === r ? (g - b) / d + (g < b ? 6 : 0) : max === g ? (b - r) / d + 2 : (r - g) / d + 4;
-  return [h * 60, s, l];
+// OKLCH: lightness as the eye sees it, so dark/light variants of pale colours stay natural
+const toLinear = (c) => ((c /= 255) <= 0.04045 ? c / 12.92 : ((c + 0.055) / 1.055) ** 2.4);
+const toSrgb = (c) => 255 * (c <= 0.0031308 ? 12.92 * c : 1.055 * c ** (1 / 2.4) - 0.055);
+
+function rgbToOklch(r, g, b) {
+  [r, g, b] = [r, g, b].map(toLinear);
+  const l = Math.cbrt(0.4122214708 * r + 0.5363325363 * g + 0.0514459929 * b);
+  const m = Math.cbrt(0.2119034982 * r + 0.6806995451 * g + 0.1073969566 * b);
+  const s = Math.cbrt(0.0883024619 * r + 0.2817188376 * g + 0.6299787005 * b);
+  const L = 0.2104542553 * l + 0.793617785 * m - 0.0040720468 * s;
+  const A = 1.9779984951 * l - 2.428592205 * m + 0.4505937099 * s;
+  const B = 0.0259040371 * l + 0.7827717662 * m - 0.808675766 * s;
+  return [L, Math.hypot(A, B), (Math.atan2(B, A) * 180) / Math.PI];
 }
 
-function hslToRgb(h, s, l) {
-  h = ((h % 360) + 360) % 360;
-  const c = (1 - Math.abs(2 * l - 1)) * s, x = c * (1 - Math.abs(((h / 60) % 2) - 1)), m = l - c / 2;
-  const [r, g, b] = h < 60 ? [c, x, 0] : h < 120 ? [x, c, 0] : h < 180 ? [0, c, x] : h < 240 ? [0, x, c] : h < 300 ? [x, 0, c] : [c, 0, x];
-  return [r, g, b].map((v) => Math.round((v + m) * 255));
+function oklchToLinear(L, C, h) {
+  const A = C * Math.cos((h * Math.PI) / 180), B = C * Math.sin((h * Math.PI) / 180);
+  const l = (L + 0.3963377774 * A + 0.2158037573 * B) ** 3;
+  const m = (L - 0.1055613458 * A - 0.0638541728 * B) ** 3;
+  const s = (L - 0.0894841775 * A - 1.291485548 * B) ** 3;
+  return [
+    4.0767416621 * l - 3.3077115913 * m + 0.2309699292 * s,
+    -1.2684380046 * l + 2.6097574011 * m - 0.3413193965 * s,
+    -0.0041960863 * l - 0.7034186147 * m + 1.707614701 * s,
+  ];
+}
+
+// out-of-gamut colours keep lightness and hue and lose chroma
+function oklchToRgb(L, C, h) {
+  L = clamp01(L);
+  const inGamut = (c) => oklchToLinear(L, c, h).every((v) => v >= -1e-4 && v <= 1 + 1e-4);
+  if (!inGamut(C)) {
+    let lo = 0, hi = C;
+    for (let i = 0; i < 20; i++) {
+      const mid = (lo + hi) / 2;
+      if (inGamut(mid)) lo = mid;
+      else hi = mid;
+    }
+    C = lo;
+  }
+  return oklchToLinear(L, C, h).map((v) => Math.round(toSrgb(clamp01(v))));
 }
 
 const clamp01 = (v) => Math.min(1, Math.max(0, v));
@@ -514,22 +540,22 @@ function hueToward(h, target, deg) {
   const diff = ((target - h + 540) % 360) - 180;
   return h + Math.sign(diff) * Math.min(Math.abs(diff), deg);
 }
-const SHADOW_HUE = 250; // cool shadows
-const LIGHT_HUE = 55; // warm highlights
+const SHADOW_HUE = 290; // OKLCH violet: cool shadows (yellow/orange turn via red, never via green)
+const LIGHT_HUE = 100; // OKLCH yellow: warm highlights
 
 // Hue-shifted ramp, dark -> light, with the base colour in the middle
 function rampColors(base, n, shift = 20) {
   const [r, g, b] = hexToRgba(base);
-  const [h, s, l] = rgbToHsl(r, g, b);
+  const [L, C, h] = rgbToOklch(r, g, b);
   const mid = Math.floor((n - 1) / 2);
   return Array.from({ length: n }, (_, i) => {
     if (i === mid) return rgbaToHex([r, g, b]);
     if (i < mid) {
       const k = (mid - i) / mid;
-      return rgbaToHex(hslToRgb(hueToward(h, SHADOW_HUE, shift * k), clamp01(s + 0.12 * k), l - (l - 0.08) * 0.85 * k));
+      return rgbaToHex(oklchToRgb(L - (L - 0.2) * 0.9 * k, C * (1 + 0.1 * k), hueToward(h, SHADOW_HUE, shift * k)));
     }
     const k = (i - mid) / (n - 1 - mid);
-    return rgbaToHex(hslToRgb(hueToward(h, LIGHT_HUE, shift * k), clamp01(s - 0.15 * k), l + (0.96 - l) * 0.8 * k));
+    return rgbaToHex(oklchToRgb(L + (0.98 - L) * 0.8 * k, C * (1 - 0.6 * k), hueToward(h, LIGHT_HUE, shift * k)));
   });
 }
 
@@ -646,11 +672,11 @@ function outlinePixels(grid, { style, color, position, strength, bounds }) {
         else continue;
       }
       const [r, g, b] = [...counts.entries()].sort((p, q) => q[1] - p[1])[0][0].split(",").map(Number);
-      const [hh, ss, ll] = rgbToHsl(r, g, b);
+      const [L, C, h] = rgbToOklch(r, g, b);
       const lit = sx + sy > 0; // the shape lies right/below: this edge faces the light (top-left)
-      const dark = lit ? strength * 0.55 : strength;
-      const hue = lit ? hh : hueToward(hh, SHADOW_HUE, 15);
-      pixels.push([x, y, rgbaToHex(hslToRgb(hue, clamp01(ss + 0.08), ll * (1 - dark)))]);
+      const light = lit ? L * (1 - strength * 0.25) : L * (1 - strength * 0.8);
+      const hue = lit ? h : hueToward(h, SHADOW_HUE, 15);
+      pixels.push([x, y, rgbaToHex(oklchToRgb(light, C * 1.05, hue))]);
     }
   }
   return pixels;

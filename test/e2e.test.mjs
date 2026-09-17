@@ -643,6 +643,12 @@ test("critique sheet, selection, watch mode, ramps and outline", async () => {
     assert.ok(ls.every((v, i) => i === 0 || v > ls[i - 1]), "gets lighter: " + ls);
     const rb = (h) => [parseInt(h.slice(1, 3), 16), parseInt(h.slice(5, 7), 16)];
     assert.ok(rb(ramp.a)[1] / (rb(ramp.a)[0] + 1) > 58 / 214, "shadows turn cooler");
+    // pale colours: the dark steps stay muted instead of turning into saturated orange
+    const cream = await json("aseprite_palette", { action: "ramp", ramps: [{ base: "#efe3c2", keys: "abcde" }] });
+    for (const k of ["a", "b"]) {
+      const n = parseInt(cream[k].slice(1), 16), ch = [n >> 16, (n >> 8) & 255, n & 255];
+      assert.ok(Math.max(...ch) - Math.min(...ch) < 70, `cream ${k} ${cream[k]} is too saturated`);
+    }
 
     // outline: selout around the shapes, one set_pixels call
     await ok("aseprite_outline", {});

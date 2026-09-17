@@ -19,6 +19,8 @@ Needs the MCP Bridge extension **0.6.0** for `aseprite_selection`, `aseprite_cha
 - `aseprite_palette` action `ramp`: hue-shifted shading ramps from base colours.
 - `aseprite_outline` (also in `aseprite_batch`): selective outline ("sel-out") or a solid
   outline, outside or inside the shapes.
+- Ramps and selective outlines are computed in OKLCH (perceptual lightness), so pale colours
+  get muted shadows instead of saturated orange, and yellow shadows turn warm, not green.
 
 ## 0.5.0
 
