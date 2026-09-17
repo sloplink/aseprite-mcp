@@ -2,7 +2,7 @@
 // - server.mjs, package.json, package-lock.json and CHANGELOG.md carry the release version
 // - the extension has its own version (extension/package.json = EXTENSION_VERSION) and is
 //   only bumped when its code changes
-// - the extension in this repository must satisfy the API level the server requires
+// - the extension in this repository must be at least the server's MIN_EXTENSION
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -26,14 +26,12 @@ test("server and package versions match", () => {
   assert.match(read("CHANGELOG.md"), new RegExp(`^## ${pkg.replace(/\./g, "\\.")}\\b`, "m"), "CHANGELOG entry");
 });
 
-test("extension version and API level are consistent", () => {
+test("extension version fits the server", () => {
   const pkg = JSON.parse(read("package.json")).version;
   const ext = JSON.parse(read("extension/package.json")).version;
-  const handlers = read("extension/handlers.lua");
-  const lua = handlers.match(/local EXTENSION_VERSION = "([^"]+)"/)[1];
-  const api = Number(handlers.match(/local API_LEVEL = (\d+)/)[1]);
-  const required = Number(read("server.mjs").match(/const REQUIRED_API = (\d+)/)[1]);
+  const lua = read("extension/handlers.lua").match(/local EXTENSION_VERSION = "([^"]+)"/)[1];
+  const min = read("server.mjs").match(/const MIN_EXTENSION = "([^"]+)"/)[1];
   assert.equal(lua, ext, "extension/package.json and EXTENSION_VERSION");
   assert.ok(cmp(ext, pkg) <= 0, `extension ${ext} must not be newer than the release ${pkg}`);
-  assert.ok(api >= required, `extension API level ${api} < server REQUIRED_API ${required}`);
+  assert.ok(cmp(ext, min) >= 0, `extension ${ext} is older than the server's MIN_EXTENSION ${min}`);
 });

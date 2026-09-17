@@ -191,7 +191,7 @@ The test suite has three parts:
 |---|---|---|
 | `test/e2e.test.mjs` | real server ⇄ real `plugin.lua` in a mocked Aseprite; server tools against a fake Aseprite | `lua5.4` (or 5.3) + `dkjson` (Debian/Ubuntu: `lua-dkjson`, otherwise `luarocks install dkjson`) for the plugin part |
 | `test/aseprite.test.mjs` | every extension handler inside a real Aseprite in batch mode (`aseprite -b`) | Aseprite; found automatically (PATH, Steam, /Applications) or via `ASEPRITE=/path/to/aseprite` |
-| `test/versions.test.mjs` | server, npm package and CHANGELOG carry the same version; the extension's version and API level fit the server | – |
+| `test/versions.test.mjs` | server, npm package and CHANGELOG carry the same version; the extension's version fits the server (`MIN_EXTENSION`) | – |
 
 Parts whose requirements are missing are skipped. CI runs everything except the real-Aseprite
 test on Node 20–24.
@@ -202,9 +202,9 @@ test on Node 20–24.
    and `server.mjs` (`VERSION`), and add a [CHANGELOG.md](CHANGELOG.md) section.
 2. Only if the extension changed: set its new version in `extension/package.json` and
    `EXTENSION_VERSION` (`extension/handlers.lua`). If the server now relies on a new or changed
-   extension command, also raise `API_LEVEL` (`extension/handlers.lua`) and `REQUIRED_API`
-   (`server.mjs`) – installed extensions below that level then get a warning.
-   Say in the CHANGELOG whether users need to update the extension.
+   extension command, also raise `MIN_EXTENSION` (`server.mjs`) to that version – older
+   installed extensions then get a warning. Say in the CHANGELOG whether users need to update
+   the extension.
 3. Run `npm test` locally with Aseprite installed – it fails if these numbers don't fit together.
 4. Push a tag `vX.Y.Z`; the release workflow attaches the built extension to a GitHub release.
 

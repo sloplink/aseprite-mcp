@@ -19,11 +19,11 @@ import { homedir, tmpdir } from "node:os";
 import { join, dirname, isAbsolute } from "node:path";
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from "node:crypto";
 
-const VERSION = "0.4.0";
+const VERSION = "0.5.0";
 const PROTOCOL = 2;
-// Command set the server needs from the extension. Server releases that only change
-// server.mjs keep it, so they work with the installed extension.
-const REQUIRED_API = 1;
+// Oldest extension that has every command this server uses. Server-only releases keep it,
+// so they work with the installed extension.
+const MIN_EXTENSION = "0.4.0";
 const PORT = Number(process.env.ASEPRITE_MCP_PORT ?? 9123);
 const HOST = "127.0.0.1"; // local only, on purpose
 const TIMEOUT_MS = Number(process.env.ASEPRITE_MCP_TIMEOUT ?? 15000);
@@ -104,7 +104,6 @@ const TOKEN = await loadToken();
 // ---------------------------------------------------------------------------
 let client = null; // authenticated Aseprite connection
 let extensionVersion = null; // reported by the extension (null = older than 0.4.0)
-let extensionApi = 0; // command set of the extension (0 = older than 0.4.0)
 let nextId = 1;
 const pending = new Map(); // id -> {resolve, reject, timer}
 
@@ -157,8 +156,6 @@ wss.on("connection", (ws, req) => {
       }
       client = ws;
       extensionVersion = typeof msg.extension === "string" ? msg.extension : null;
-      // 0.4.0 predates the API level but already has everything level 1 needs
-      extensionApi = Number.isInteger(msg.api) ? msg.api : extensionVersion ? 1 : 0;
       log(`Aseprite ${msg.version ?? "?"} (extension ${extensionVersion ?? "< 0.4.0"}) connected and authenticated.`);
       if (versionWarning()) log(versionWarning());
       return;
@@ -182,8 +179,16 @@ wss.on("connection", (ws, req) => {
   });
 });
 
+// "0.10.0" > "0.9.0"; anything unparsable counts as older
+function compareVersions(a, b) {
+  const parse = (v) => (/^\d+\.\d+\.\d+$/.test(v ?? "") ? v.split(".").map(Number) : [-1, 0, 0]);
+  const [x, y] = [parse(a), parse(b)];
+  for (let i = 0; i < 3; i++) if (x[i] !== y[i]) return x[i] - y[i];
+  return 0;
+}
+
 function versionWarning() {
-  if (extensionApi >= REQUIRED_API) return null;
+  if (compareVersions(extensionVersion, MIN_EXTENSION) >= 0) return null;
   return (
     `The MCP Bridge extension in Aseprite (version ${extensionVersion ?? "< 0.4.0"}) is too old for server ${VERSION}. ` +
     "Install the extension from the latest release (or dist/aseprite-mcp-bridge.aseprite-extension) and restart Aseprite."
@@ -754,7 +759,7 @@ tool(
     annotations: { readOnlyHint: true },
   },
   async () => {
-    const info = { ...(await call("info")), server: VERSION, requiredApi: REQUIRED_API };
+    const info = { ...(await call("info")), server: VERSION, minExtension: MIN_EXTENSION };
     const warning = versionWarning();
     if (warning) info.warning = warning;
     return asText(info);

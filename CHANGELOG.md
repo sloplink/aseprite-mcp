@@ -4,12 +4,14 @@ Releases are versioned by the server. The Aseprite extension has its own version
 changes when its code changes; `aseprite_status` warns when the installed extension is too
 old for the server. After updating the extension, restart Aseprite.
 
-## Unreleased
+## 0.5.0
+
+Server-only release: the MCP Bridge extension stays at **0.4.0** – no need to reinstall it.
 
 ### Changed
-- Server and extension are versioned separately. The extension reports an API level and the
-  server only warns when it needs a newer one, so server-only releases work with the
-  installed extension (0.4.0 counts as API level 1).
+- Server and extension are versioned separately. The server only warns when the installed
+  extension is older than the version it needs (currently 0.4.0), so server-only releases
+  work with the installed extension.
 
 ### Added
 - Stamps: `aseprite_pixel_map` and `aseprite_animation` accept `stamps` (reusable pixel maps)
