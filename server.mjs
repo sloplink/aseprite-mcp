@@ -318,6 +318,7 @@ function composePixelMap({ palette = {}, rows = [], x = 0, y = 0, stamps = {}, p
 }
 
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
+const FILE_FIELDS = new Set(["rows", "palette", "x", "y", "stamps", "place", "frames", "duration"]);
 
 // Drawing data from a .json file. Errors never echo file contents.
 async function loadDrawingFile(path, schema, what) {
@@ -339,7 +340,12 @@ async function loadDrawingFile(path, schema, what) {
   }
   const parsed = schema.safeParse(data);
   if (!parsed.success) {
-    const why = parsed.error.issues.map((e) => `${e.path.join(".") || "(root)"}: ${e.message}`).slice(0, 5).join("; ");
+    // Only known field names, indices and error codes: never names or values taken from the file
+    const safe = (k) => (typeof k === "number" || FILE_FIELDS.has(k) ? k : "<key>");
+    const why = parsed.error.issues
+      .map((e) => `${e.path.map(safe).join(".") || "(root)"}: ${e.code}`)
+      .slice(0, 5)
+      .join("; ");
     throw new Error(`File does not contain valid ${what} data (${path}): ${why}`);
   }
   return parsed.data;

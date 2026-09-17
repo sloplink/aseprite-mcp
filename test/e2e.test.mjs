@@ -516,7 +516,8 @@ test("stamps and drawing data from files", async () => {
     await fails("aseprite_pixel_map", { file: join(dir, "missing.json") }, /Cannot read file/);
     const secret = await fails("aseprite_pixel_map", { file: write("bad.json", "SECRET-CONTENT {") }, /not valid JSON/);
     assert.doesNotMatch(secret, /SECRET/, "file contents are never echoed");
-    await fails("aseprite_pixel_map", { file: write("wrong.json", { rows: ["a"], evil: 1 }) }, /does not contain valid pixel map data/);
+    const leak = await fails("aseprite_pixel_map", { file: write("wrong.json", { rows: ["a"], apiKeyName: "hunter2", palette: { a: "not-a-color" } }) }, /does not contain valid pixel map data/);
+    assert.doesNotMatch(leak, /apiKeyName|hunter2|not-a-color/, "no keys or values from the file");
 
     // animation from a file with stamps; inline duration wins
     const anim = write("anim.json", {
