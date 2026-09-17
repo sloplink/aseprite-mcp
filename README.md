@@ -24,7 +24,7 @@ text format.
 ## Requirements
 
 - Aseprite **v1.3 or later**
-- Node.js 18+
+- Node.js 20+
 - An MCP client that runs local (stdio) servers, e.g. [Claude Code](https://code.claude.com/docs)
 
 ## Installation
@@ -180,7 +180,7 @@ The test suite has three parts:
 | `test/versions.test.mjs` | server, npm package, extension and CHANGELOG carry the same version | – |
 
 Parts whose requirements are missing are skipped. CI runs everything except the real-Aseprite
-test on Node 18–24.
+test on Node 20–24.
 
 ### Releasing
 

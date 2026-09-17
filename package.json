@@ -16,7 +16,7 @@
   "author": "sloplink",
   "license": "MIT",
   "repository": { "type": "git", "url": "git+https://github.com/sloplink/aseprite-mcp.git" },
-  "engines": { "node": ">=18" },
+  "engines": { "node": ">=20" },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.30.0",
     "ws": "^8.21.0",

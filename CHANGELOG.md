@@ -35,6 +35,7 @@ Includes everything since 0.2.0 (0.3.0 was never released).
 - Error messages no longer start with the Lua source location.
 
 ### Changed
+- Requires Node.js 20 or newer (Node.js 18 is end-of-life).
 - Tool results are compact JSON (fewer tokens).
 - Protocol: the extension sends its version in `hello` (backwards compatible).
 
