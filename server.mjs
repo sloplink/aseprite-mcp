@@ -33,8 +33,10 @@ const ALLOW_LUA = process.env.ASEPRITE_MCP_ALLOW_LUA === "1";
 const CONFIG_DIR = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "aseprite-mcp");
 const TOKEN_FILE = process.env.ASEPRITE_MCP_TOKEN_FILE ?? join(CONFIG_DIR, "token");
 const PALETTE_FILE = process.env.ASEPRITE_MCP_PALETTE_FILE ?? join(CONFIG_DIR, "palettes.json");
-// Directories the `file` option may read from (default: the system temp directory)
-const FILE_DIRS = (process.env.ASEPRITE_MCP_FILE_DIRS ?? tmpdir()).split(delimiter).filter(Boolean);
+// Directories the `file` option may read from. Default: the system temp directory, plus /tmp on
+// macOS/Linux (on macOS the temp directory is /var/folders/..., but tools often write to /tmp).
+const DEFAULT_FILE_DIRS = [tmpdir(), ...(process.platform === "win32" ? [] : ["/tmp"])].join(delimiter);
+const FILE_DIRS = (process.env.ASEPRITE_MCP_FILE_DIRS ?? DEFAULT_FILE_DIRS).split(delimiter).filter(Boolean);
 
 const log = (...a) => console.error("[aseprite-mcp]", ...a);
 
@@ -97,7 +99,7 @@ Environment:
   ASEPRITE_MCP_TOKEN         use this token instead of the token file
   ASEPRITE_MCP_TOKEN_FILE    token file location (default ${TOKEN_FILE})
   ASEPRITE_MCP_PALETTE_FILE  saved palettes (default ${PALETTE_FILE})
-  ASEPRITE_MCP_FILE_DIRS     directories the file option may read (default ${tmpdir()})`);
+  ASEPRITE_MCP_FILE_DIRS     directories the file option may read (default ${DEFAULT_FILE_DIRS})`);
   process.exit(0);
 }
 

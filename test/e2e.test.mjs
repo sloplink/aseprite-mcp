@@ -706,8 +706,15 @@ test("security limits", async () => {
     const outside = join(other, "secret.json");
     writeFileSync(outside, JSON.stringify(["SECRETROW"]));
     assert.match(await err("aseprite_pixel_map", { file: outside, palette: { a: "#000" } }), /must be inside/);
-    symlinkSync(outside, join(allowed, "link.json"));
-    assert.match(await err("aseprite_pixel_map", { file: join(allowed, "link.json"), palette: { a: "#000" } }), /must be inside/);
+    let linked = true;
+    try {
+      symlinkSync(outside, join(allowed, "link.json"));
+    } catch {
+      linked = false; // Windows without developer mode cannot create symlinks
+    }
+    if (linked) {
+      assert.match(await err("aseprite_pixel_map", { file: join(allowed, "link.json"), palette: { a: "#000" } }), /must be inside/);
+    }
     // characters from a file never show up in errors
     writeFileSync(join(allowed, "rows.json"), JSON.stringify(["SECRETROW"]));
     const msg = await err("aseprite_pixel_map", { file: join(allowed, "rows.json"), palette: { a: "#000" } });

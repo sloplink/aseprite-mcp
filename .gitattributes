@@ -1,0 +1,3 @@
+# Keep LF everywhere (Lua, JSON and Markdown are compared byte by byte in tests and the build)
+* text=auto eol=lf
+*.aseprite-extension binary

@@ -156,7 +156,7 @@ in error messages.
 - `aseprite_open` / `aseprite_save` can read and write any path your user can access, but only
   files with an image format Aseprite supports (`.aseprite`, `.png`, `.gif`, …) and absolute paths.
 - The `file` option of `aseprite_pixel_map` / `aseprite_animation` only reads `.json` files that
-  belong to you and lie in the system temp directory (or in `ASEPRITE_MCP_FILE_DIRS`); symlinks
+  belong to you and lie in the system temp directory or `/tmp` (or in `ASEPRITE_MCP_FILE_DIRS`); symlinks
   are resolved first, and error messages never contain the file's contents.
 - Aseprite stores the token in the extension's preferences
   (`~/.config/aseprite/extensions/aseprite-mcp-bridge/__pref.lua`), which is readable by other
@@ -173,7 +173,7 @@ in error messages.
 | `ASEPRITE_MCP_TOKEN` | – | Use this token instead of the token file |
 | `ASEPRITE_MCP_TOKEN_FILE` | see above | Token file location |
 | `ASEPRITE_MCP_PALETTE_FILE` | `~/.config/aseprite-mcp/palettes.json` | Where `aseprite_palette` stores palettes |
-| `ASEPRITE_MCP_FILE_DIRS` | system temp directory | Directories the `file` option may read from (separated by `:`, on Windows `;`) |
+| `ASEPRITE_MCP_FILE_DIRS` | system temp directory (+ `/tmp` on macOS/Linux) | Directories the `file` option may read from (separated by `:`, on Windows `;`) |
 
 Example with Claude Code:
 
@@ -208,7 +208,7 @@ The test suite has three parts:
 | `test/versions.test.mjs` | server, npm package and CHANGELOG carry the same version; the extension's version fits the server (`MIN_EXTENSION`) | – |
 
 Parts whose requirements are missing are skipped. CI runs everything except the real-Aseprite
-test on Node 20–24.
+test on Node 20–24 (Linux) and on macOS and Windows.
 
 ### Releasing
 
