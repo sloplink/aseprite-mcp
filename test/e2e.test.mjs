@@ -7,7 +7,7 @@ import { createInterface } from "node:readline";
 import { createHmac, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import WebSocket, { WebSocketServer } from "ws";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -442,6 +442,115 @@ test("copy, animation and saved palettes", async () => {
     assert.equal(fake.cmds.find((m) => m.cmd === "frame" && m.args.action === "new" && m.args.copy === false) !== undefined, true);
     e = await mcp.callTool({ name: "aseprite_animation", arguments: { start: 9, frames: [{ rows: [] }] } });
     assert.match(e.content[0].text, /beyond the last frame/);
+  } finally {
+    fake.close();
+    await mcp.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("stamps and drawing data from files", async () => {
+  const token = randomBytes(24).toString("hex");
+  const port = portCounter++;
+  const dir = mkdtempSync(join(tmpdir(), "aseprite-mcp-test-"));
+  const mcp = await startServer(token, port);
+  let frameCount = 1;
+  const fake = await fakeAseprite(token, port, (msg) => {
+    if (msg.cmd === "frame" && msg.args.action === "new") frameCount++;
+    if (msg.cmd === "set_pixels") return { drawn: msg.args.pixels.length };
+    if (["info", "frame"].includes(msg.cmd)) return { frameCount };
+    return {};
+  });
+  const ok = async (name, args) => {
+    const r = await mcp.callTool({ name, arguments: args });
+    assert.ok(!r.isError, r.content[0].text);
+    return JSON.parse(r.content[0].text);
+  };
+  const fails = async (name, args, re) => {
+    const r = await mcp.callTool({ name, arguments: args });
+    assert.ok(r.isError, `${name} should fail`);
+    assert.match(r.content[0].text, re);
+    return r.content[0].text;
+  };
+  const write = (name, data) => {
+    const p = join(dir, name);
+    writeFileSync(p, typeof data === "string" ? data : JSON.stringify(data));
+    return p;
+  };
+  const lastPixels = () => fake.cmds.at(-1).args.pixels;
+  try {
+    // stamps: placed after rows, relative to x/y, flipped, later pixels win, no duplicates
+    await ok("aseprite_pixel_map", {
+      palette: { a: "#111", b: "#222" },
+      rows: ["aaa"],
+      x: 10,
+      y: 20,
+      stamps: { s: { rows: ["b.", "bc"], palette: { c: "#333" } } },
+      place: [["s", 1, 0], ["s", 0, 2, "h"], ["s", 4, 0, "v"]],
+    });
+    assert.deepEqual(lastPixels(), [
+      [10, 20, "#111"], [11, 20, "#222"], [12, 20, "#111"], [11, 21, "#222"], [12, 21, "#333"],
+      [11, 22, "#222"], [10, 23, "#333"], [11, 23, "#222"],
+      [14, 20, "#222"], [15, 20, "#333"], [14, 21, "#222"],
+    ]);
+
+    // place only, no rows
+    await ok("aseprite_pixel_map", { palette: { a: "#111" }, stamps: { dot: { rows: ["a"] } }, place: [["dot", 3, 4]] });
+    assert.deepEqual(lastPixels(), [[3, 4, "#111"]]);
+
+    // file: plain array of rows; inline palette
+    await ok("aseprite_pixel_map", { file: write("rows.json", ["a.a"]), palette: { a: "#abc" }, y: 5 });
+    assert.deepEqual(lastPixels(), [[0, 5, "#abc"], [2, 5, "#abc"]]);
+
+    // file: object; inline x and palette keys override the file
+    const obj = write("map.json", { rows: ["ab"], palette: { a: "#111", b: "#222" }, x: 7, stamps: { t: { rows: ["b"] } }, place: [["t", 0, 1]] });
+    await ok("aseprite_pixel_map", { file: obj, palette: { b: "#999" }, x: 1, layer: "L" });
+    assert.deepEqual(fake.cmds.at(-1).args, { layer: "L", pixels: [[1, 0, "#111"], [2, 0, "#999"], [1, 1, "#999"]] });
+
+    // errors
+    await fails("aseprite_pixel_map", { palette: { a: "#111" }, place: [["nope", 0, 0]] }, /Unknown stamp 'nope'\. Defined stamps: \(none\)/);
+    await fails("aseprite_pixel_map", { palette: { a: "#111" }, stamps: { s: { rows: ["z"] } }, place: [["s", 0, 0]] }, /stamp 's': Characters not in palette: "z"/);
+    await fails("aseprite_pixel_map", { palette: { a: "#111" } }, /Nothing to draw/);
+    await fails("aseprite_pixel_map", { file: "rows.json" }, /absolute path/);
+    await fails("aseprite_pixel_map", { file: join(dir, "x.txt") }, /\.json file/);
+    await fails("aseprite_pixel_map", { file: join(dir, "missing.json") }, /Cannot read file/);
+    const secret = await fails("aseprite_pixel_map", { file: write("bad.json", "SECRET-CONTENT {") }, /not valid JSON/);
+    assert.doesNotMatch(secret, /SECRET/, "file contents are never echoed");
+    await fails("aseprite_pixel_map", { file: write("wrong.json", { rows: ["a"], evil: 1 }) }, /does not contain valid pixel map data/);
+
+    // animation from a file with stamps; inline duration wins
+    const anim = write("anim.json", {
+      palette: { h: "#f00", l: "#0f0" },
+      stamps: { head: { rows: ["hh"] } },
+      duration: 0.3,
+      frames: [
+        { rows: [".", "l"], place: [["head", 0, 0]] },
+        { rows: [".", ".l"], place: [["head", 0, -1]], duration: 0.05 },
+      ],
+    });
+    const before = fake.cmds.length;
+    const st = await ok("aseprite_animation", { file: anim, duration: 0.1, copyPrevious: false });
+    assert.equal(st.frameCount, 2);
+    const sent = fake.cmds.slice(before);
+    const sets = sent.filter((m) => m.cmd === "set_pixels");
+    assert.deepEqual(sets[0].args.pixels, [[0, 1, "#0f0"], [0, 0, "#f00"], [1, 0, "#f00"]]);
+    assert.deepEqual(sets[1].args.pixels, [[1, 1, "#0f0"], [0, -1, "#f00"], [1, -1, "#f00"]]);
+    const durs = sent.filter((m) => m.args.action === "duration").map((m) => m.args.duration);
+    assert.deepEqual(durs, [0.1, 0.05]);
+    assert.equal(sent.find((m) => m.args.action === "new").args.copy, false);
+
+    // animation: inline frames and stamps, no file; errors name the frame
+    await ok("aseprite_animation", { palette: { a: "#111" }, stamps: { s: { rows: ["a"] } }, frames: [{ place: [["s", 2, 2]] }] });
+    await fails("aseprite_animation", { palette: { a: "#111" }, frames: [{ place: [["gone", 0, 0]] }] }, /frame entry #1 \(frame 1\): Unknown stamp 'gone'/);
+    await fails("aseprite_animation", { palette: { a: "#111" } }, /Pass frames/);
+    await fails("aseprite_animation", { file: write("anim-bad.json", { frames: [] }) }, /valid animation data/);
+
+    // both work inside batch
+    const b = await ok("aseprite_batch", { ops: [
+      { op: "pixel_map", file: obj },
+      { op: "animation", file: anim },
+    ] });
+    assert.equal(b.results.length, 2);
   } finally {
     fake.close();
     await mcp.close();

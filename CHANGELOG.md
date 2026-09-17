@@ -3,6 +3,14 @@
 Server and Aseprite extension are released together and always carry the same version.
 After updating the extension, restart Aseprite.
 
+## Unreleased
+
+### Added
+- Stamps: `aseprite_pixel_map` and `aseprite_animation` accept `stamps` (reusable pixel maps)
+  and `place` (`[name, x, y, flip?]`), so repeated parts are sent only once.
+- `file`: `aseprite_pixel_map` and `aseprite_animation` can read their drawing data from a
+  `.json` file, so generated art does not have to be pasted into the conversation.
+
 ## 0.4.0
 
 Includes everything since 0.2.0 (0.3.0 was never released).

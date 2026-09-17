@@ -14,9 +14,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { WebSocketServer } from "ws";
 import { z } from "zod";
-import { readFile, writeFile, mkdir, unlink, chmod, rename } from "node:fs/promises";
+import { readFile, writeFile, mkdir, unlink, chmod, rename, stat } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, isAbsolute } from "node:path";
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from "node:crypto";
 
 const VERSION = "0.4.0";
@@ -238,6 +238,25 @@ const target = {
 const MAX_PIXELS = 65536;
 const rect = z.tuple([z.number().int(), z.number().int(), z.number().int().min(1), z.number().int().min(1)]);
 const mapPalette = z.record(z.string().length(1), color);
+const rowsSchema = z.array(z.string()).max(4096);
+const stampsSchema = z
+  .record(
+    z.string().min(1).max(64),
+    z.object({ rows: rowsSchema.min(1), palette: mapPalette.optional() }).strict()
+  )
+  .describe('Reusable pixel maps: {"name": {"rows": [...], "palette"?: {...}}}');
+const placeSchema = z
+  .array(
+    z.union([
+      z.tuple([z.string(), z.number().int(), z.number().int()]),
+      z.tuple([z.string(), z.number().int(), z.number().int(), z.enum(["h", "v", "hv"])]),
+    ])
+  )
+  .max(4096)
+  .describe('Stamps to draw after rows, in order: [name, x, y] or [name, x, y, "h"|"v"|"hv"] (flip); x/y relative to the map');
+const fileSchema = z
+  .string()
+  .describe("Absolute path of a .json file with the drawing data (saves tokens for generated art); inline arguments override it");
 const paletteName = z
   .string()
   .regex(/^[A-Za-z0-9][\w .-]{0,63}$/, "letters, digits, space, _ . - (max 64, starting with a letter or digit)")
@@ -265,6 +284,69 @@ function pixelMapToPixels({ palette, rows, x = 0, y = 0 }) {
   if (pixels.length > MAX_PIXELS) throw new Error(`Too many pixels (${pixels.length} > ${MAX_PIXELS}).`);
   return pixels;
 }
+
+function flipRows(rows, flip) {
+  let out = rows;
+  if (flip === "h" || flip === "hv") {
+    const w = Math.max(...rows.map((r) => Array.from(r).length));
+    out = out.map((r) => Array.from(r.padEnd(w, ".")).reverse().join(""));
+  }
+  if (flip === "v" || flip === "hv") out = [...out].reverse();
+  return out;
+}
+
+// rows + placed stamps -> one pixel list; later pixels win, duplicates are dropped
+function composePixelMap({ palette = {}, rows = [], x = 0, y = 0, stamps = {}, place = [] }) {
+  const byPos = new Map();
+  const add = (list) => {
+    for (const p of list) byPos.set(`${p[0]},${p[1]}`, p);
+  };
+  add(pixelMapToPixels({ palette, rows, x, y }));
+  for (const [name, sx, sy, flip] of place) {
+    const st = Object.hasOwn(stamps, name) ? stamps[name] : undefined;
+    if (!st) {
+      throw new Error(`Unknown stamp '${name}'. Defined stamps: ${Object.keys(stamps).join(", ") || "(none)"}.`);
+    }
+    try {
+      add(pixelMapToPixels({ palette: { ...palette, ...st.palette }, rows: flipRows(st.rows, flip), x: x + sx, y: y + sy }));
+    } catch (err) {
+      throw new Error(`stamp '${name}': ${err.message}`);
+    }
+  }
+  if (byPos.size > MAX_PIXELS) throw new Error(`Too many pixels (${byPos.size} > ${MAX_PIXELS}).`);
+  return [...byPos.values()];
+}
+
+const MAX_FILE_BYTES = 16 * 1024 * 1024;
+
+// Drawing data from a .json file. Errors never echo file contents.
+async function loadDrawingFile(path, schema, what) {
+  if (!isAbsolute(path)) throw new Error(`file must be an absolute path: ${path}`);
+  if (!path.toLowerCase().endsWith(".json")) throw new Error(`file must be a .json file: ${path}`);
+  let info;
+  try {
+    info = await stat(path);
+  } catch {
+    throw new Error(`Cannot read file: ${path}`);
+  }
+  if (!info.isFile()) throw new Error(`Not a file: ${path}`);
+  if (info.size > MAX_FILE_BYTES) throw new Error(`File too large (${info.size} > ${MAX_FILE_BYTES} bytes): ${path}`);
+  let data;
+  try {
+    data = JSON.parse(await readFile(path, "utf8"));
+  } catch {
+    throw new Error(`File is not valid JSON: ${path}`);
+  }
+  const parsed = schema.safeParse(data);
+  if (!parsed.success) {
+    const why = parsed.error.issues.map((e) => `${e.path.join(".") || "(root)"}: ${e.message}`).slice(0, 5).join("; ");
+    throw new Error(`File does not contain valid ${what} data (${path}): ${why}`);
+  }
+  return parsed.data;
+}
+
+// Only the arguments that were actually passed
+const given = (obj) => Object.fromEntries(Object.entries(obj).filter(([, v]) => v !== undefined));
 
 // Raw "rrggbbaa…" rows from Aseprite -> pixel_map format (palette + text rows).
 // '"' and '\' are left out because they need escaping in JSON (= extra tokens).
@@ -355,6 +437,44 @@ async function getPixels(args) {
 
 const splitHex = (row) => row.match(/.{8}/g) ?? [];
 
+const pixelMapFile = z.union([
+  rowsSchema,
+  z
+    .object({
+      rows: rowsSchema.optional(),
+      palette: mapPalette.optional(),
+      x: z.number().int().optional(),
+      y: z.number().int().optional(),
+      stamps: stampsSchema.optional(),
+      place: placeSchema.optional(),
+    })
+    .strict(),
+]);
+
+const animationFrame = z
+  .object({
+    rows: rowsSchema.optional().describe("Pixel rows for this frame (may be empty = unchanged)"),
+    x: z.number().int().optional(),
+    y: z.number().int().optional(),
+    place: placeSchema.optional(),
+    palette: mapPalette.optional().describe("Extra/overriding keys for this frame"),
+    duration: z.number().positive().optional().describe("Seconds"),
+  })
+  .strict();
+const animationFrames = z.array(animationFrame).min(1).max(256);
+
+const animationFile = z.union([
+  animationFrames,
+  z
+    .object({
+      frames: animationFrames,
+      palette: mapPalette.optional(),
+      stamps: stampsSchema.optional(),
+      duration: z.number().positive().optional(),
+    })
+    .strict(),
+]);
+
 // Operations usable both as individual tools and inside aseprite_batch.
 // returnsInfo: the Lua side replies with the full sprite status.
 const ops = {
@@ -375,19 +495,35 @@ const ops = {
     description:
       "Most token-efficient way to draw many exact pixels: a palette of single-character keys and one text row per pixel row. " +
       "'.' and space leave the pixel unchanged; map a key to '#00000000' to erase. One undo step. " +
-      'Example: palette {"k":"#222034","y":"#fbf236"}, rows ["..kk..", ".kyyk.", "kyyyyk"].',
+      'Example: palette {"k":"#222034","y":"#fbf236"}, rows ["..kk..", ".kyyk.", "kyyyyk"]. ' +
+      "Repeated parts: define stamps once and draw them with place. Generated art: write the data to a .json file and pass file.",
     shape: {
       palette: mapPalette.optional().describe("Single character -> hex color (required unless paletteName is given)"),
       paletteName: paletteName.optional(),
-      rows: z.array(z.string()).min(1).max(4096).describe("One string per pixel row, top to bottom"),
-      x: z.number().int().default(0).describe("Left edge of the map on the canvas"),
-      y: z.number().int().default(0).describe("Top edge of the map on the canvas"),
+      rows: rowsSchema.optional().describe("One string per pixel row, top to bottom"),
+      x: z.number().int().optional().describe("Left edge of the map on the canvas (default 0)"),
+      y: z.number().int().optional().describe("Top edge of the map on the canvas (default 0)"),
+      stamps: stampsSchema.optional(),
+      place: placeSchema.optional(),
+      file: fileSchema.optional().describe(
+        "Absolute path of a .json file: an array of rows, or an object with rows/palette/x/y/stamps/place; inline arguments override it"
+      ),
       ...target,
     },
-    run: async ({ palette, paletteName, rows, x, y, ...rest }) => {
-      palette = await resolvePalette({ palette, paletteName });
-      if (!palette) throw new Error("Pass palette or paletteName.");
-      const pixels = pixelMapToPixels({ palette, rows, x, y });
+    run: async ({ palette, paletteName, rows, x, y, stamps, place, file, ...rest }) => {
+      let data = given({ rows, x, y, stamps, place });
+      let filePalette;
+      if (file) {
+        const f = await loadDrawingFile(file, pixelMapFile, "pixel map");
+        const fromFile = Array.isArray(f) ? { rows: f } : f;
+        filePalette = fromFile.palette;
+        delete fromFile.palette;
+        data = { ...fromFile, ...data };
+      }
+      palette = await resolvePalette({ palette: { ...filePalette, ...palette }, paletteName });
+      if (!palette || !Object.keys(palette).length) throw new Error("Pass palette or paletteName (or a palette in the file).");
+      if (!data.rows?.length && !data.place?.length) throw new Error("Nothing to draw: pass rows, place or file.");
+      const pixels = composePixelMap({ palette, ...data });
       if (!pixels.length) return { drawn: 0 };
       return call("set_pixels", { ...rest, pixels });
     },
@@ -523,22 +659,15 @@ const ops = {
     description:
       "Draws several frames in ONE call, each as a pixel map, creating missing frames automatically. " +
       "With copyPrevious (default) a new frame starts as a copy of the previous one, so each entry only needs the changed rows " +
-      "(use x/y and '.' to leave pixels unchanged; '.' never erases, map a key to '#00000000' for that). Returns the sprite status.",
+      "(use x/y and '.' to leave pixels unchanged; '.' never erases, map a key to '#00000000' for that). " +
+      "Parts that repeat across frames (head, body …) belong in stamps, placed per frame with place: [name, x, y]. " +
+      "For generated animations write frames/palette/stamps to a .json file and pass file. Returns the sprite status.",
     shape: {
-      frames: z
-        .array(
-          z
-            .object({
-              rows: z.array(z.string()).max(4096).describe("Pixel rows for this frame (may be empty = unchanged)"),
-              x: z.number().int().default(0),
-              y: z.number().int().default(0),
-              palette: mapPalette.optional().describe("Extra/overriding keys for this frame"),
-              duration: z.number().positive().optional().describe("Seconds"),
-            })
-            .strict()
-        )
-        .min(1)
-        .max(256),
+      frames: animationFrames.optional().describe("One entry per frame (required unless file is given)"),
+      stamps: stampsSchema.optional(),
+      file: fileSchema.optional().describe(
+        "Absolute path of a .json file: an array of frames, or an object with frames/palette/stamps/duration; inline arguments override it"
+      ),
       palette: mapPalette.optional().describe("Palette shared by all frames"),
       paletteName: paletteName.optional(),
       start: z.number().int().min(1).default(1).describe("Frame number of the first entry"),
@@ -547,8 +676,18 @@ const ops = {
       layer: z.string().optional().describe("Layer name (default: active layer)"),
     },
     returnsInfo: true,
-    run: async ({ frames, palette, paletteName, start, copyPrevious, duration, layer }) => {
-      const shared = (await resolvePalette({ palette, paletteName })) ?? {};
+    run: async ({ frames, stamps, file, palette, paletteName, start, copyPrevious, duration, layer }) => {
+      let filePalette;
+      if (file) {
+        const f = await loadDrawingFile(file, animationFile, "animation");
+        const fromFile = Array.isArray(f) ? { frames: f } : f;
+        frames ??= fromFile.frames;
+        stamps = { ...fromFile.stamps, ...stamps };
+        duration ??= fromFile.duration;
+        filePalette = fromFile.palette;
+      }
+      if (!frames?.length) throw new Error("Pass frames (or a file with frames).");
+      const shared = (await resolvePalette({ palette: { ...filePalette, ...palette }, paletteName })) ?? {};
       let count = (await call("info")).frameCount;
       if (!count) throw new Error("No active sprite. Create one with aseprite_new_sprite.");
       if (start > count + 1) throw new Error(`start ${start} is beyond the last frame + 1 (sprite has ${count} frames).`);
@@ -560,7 +699,7 @@ const ops = {
             await call("frame", { action: "new", frame: n - 1, copy: copyPrevious });
             count++;
           }
-          const pixels = pixelMapToPixels({ palette: { ...shared, ...f.palette }, rows: f.rows, x: f.x, y: f.y });
+          const pixels = composePixelMap({ palette: { ...shared, ...f.palette }, rows: f.rows, x: f.x, y: f.y, stamps, place: f.place });
           if (pixels.length) await call("set_pixels", { pixels, layer, frame: n });
           const d = f.duration ?? duration;
           if (d) await call("frame", { action: "duration", frame: n, duration: d });
