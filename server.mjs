@@ -14,9 +14,9 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { WebSocketServer } from "ws";
 import { z } from "zod";
-import { readFile, writeFile, mkdir, unlink, chmod, rename, stat } from "node:fs/promises";
+import { readFile, writeFile, mkdir, unlink, chmod, rename, stat, realpath } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join, dirname, isAbsolute } from "node:path";
+import { join, dirname, isAbsolute, sep, delimiter } from "node:path";
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from "node:crypto";
 import { deflateSync } from "node:zlib";
 
@@ -33,6 +33,8 @@ const ALLOW_LUA = process.env.ASEPRITE_MCP_ALLOW_LUA === "1";
 const CONFIG_DIR = join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "aseprite-mcp");
 const TOKEN_FILE = process.env.ASEPRITE_MCP_TOKEN_FILE ?? join(CONFIG_DIR, "token");
 const PALETTE_FILE = process.env.ASEPRITE_MCP_PALETTE_FILE ?? join(CONFIG_DIR, "palettes.json");
+// Directories the `file` option may read from (default: the system temp directory)
+const FILE_DIRS = (process.env.ASEPRITE_MCP_FILE_DIRS ?? tmpdir()).split(delimiter).filter(Boolean);
 
 const log = (...a) => console.error("[aseprite-mcp]", ...a);
 
@@ -94,7 +96,8 @@ Environment:
   ASEPRITE_MCP_TIMEOUT       per-command timeout in ms (default 15000)
   ASEPRITE_MCP_TOKEN         use this token instead of the token file
   ASEPRITE_MCP_TOKEN_FILE    token file location (default ${TOKEN_FILE})
-  ASEPRITE_MCP_PALETTE_FILE  saved palettes (default ${PALETTE_FILE})`);
+  ASEPRITE_MCP_PALETTE_FILE  saved palettes (default ${PALETTE_FILE})
+  ASEPRITE_MCP_FILE_DIRS     directories the file option may read (default ${tmpdir()})`);
   process.exit(0);
 }
 
@@ -258,7 +261,7 @@ const target = {
 const MAX_PIXELS = 65536;
 const rect = z.tuple([z.number().int(), z.number().int(), z.number().int().min(1), z.number().int().min(1)]);
 const mapPalette = z.record(z.string().length(1), color);
-const rowsSchema = z.array(z.string()).max(4096);
+const rowsSchema = z.array(z.string().max(4096)).max(4096);
 const stampsSchema = z
   .record(
     z.string().min(1).max(64),
@@ -295,7 +298,8 @@ async function resolveRect(r) {
 
 // Pixel map (palette + text rows) -> [x, y, color] list for set_pixels
 const SKIP_CHARS = new Set([".", " "]);
-function pixelMapToPixels({ palette, rows, x = 0, y = 0 }) {
+// hideChars: the rows came from a file – never repeat their characters in an error
+function pixelMapToPixels({ palette, rows, x = 0, y = 0, hideChars = false }) {
   const pixels = [];
   const unknown = new Set();
   rows.forEach((row, j) => {
@@ -307,8 +311,9 @@ function pixelMapToPixels({ palette, rows, x = 0, y = 0 }) {
     });
   });
   if (unknown.size) {
+    const which = hideChars ? "some characters in the file" : [...unknown].map((c) => JSON.stringify(c)).join(", ");
     throw new Error(
-      `Characters not in palette: ${[...unknown].map((c) => JSON.stringify(c)).join(", ")}. ` +
+      `Characters not in palette: ${which}. ` +
         `Palette keys: ${Object.keys(palette).join("") || "(none)"}; use '.' or space for "leave unchanged".`
     );
   }
@@ -327,19 +332,22 @@ function flipRows(rows, flip) {
 }
 
 // rows + placed stamps -> one pixel list; later pixels win, duplicates are dropped
-function composePixelMap({ palette = {}, rows = [], x = 0, y = 0, stamps = {}, place = [] }) {
+function composePixelMap({ palette = {}, rows = [], x = 0, y = 0, stamps = {}, place = [], hideChars = false }) {
   const byPos = new Map();
+  let total = 0;
   const add = (list) => {
+    total += list.length;
+    if (total > MAX_PIXELS * 4) throw new Error(`Too many pixels before merging (> ${MAX_PIXELS * 4}); place fewer stamps.`);
     for (const p of list) byPos.set(`${p[0]},${p[1]}`, p);
   };
-  add(pixelMapToPixels({ palette, rows, x, y }));
+  add(pixelMapToPixels({ palette, rows, x, y, hideChars }));
   for (const [name, sx, sy, flip] of place) {
     const st = Object.hasOwn(stamps, name) ? stamps[name] : undefined;
     if (!st) {
       throw new Error(`Unknown stamp '${name}'. Defined stamps: ${Object.keys(stamps).join(", ") || "(none)"}.`);
     }
     try {
-      add(pixelMapToPixels({ palette: { ...palette, ...st.palette }, rows: flipRows(st.rows, flip), x: x + sx, y: y + sy }));
+      add(pixelMapToPixels({ palette: { ...palette, ...st.palette }, rows: flipRows(st.rows, flip), x: x + sx, y: y + sy, hideChars }));
     } catch (err) {
       throw new Error(`stamp '${name}': ${err.message}`);
     }
@@ -349,23 +357,47 @@ function composePixelMap({ palette = {}, rows = [], x = 0, y = 0, stamps = {}, p
 }
 
 const MAX_FILE_BYTES = 16 * 1024 * 1024;
+
+// Formats Aseprite can open/save; anything else (scripts, dotfiles, ...) is refused
+const IMAGE_PATH = /\.(aseprite|ase|png|gif|jpe?g|bmp|webp|tga|pcx|pcc|ico|flc|fli|svg|qoi|css)$/i;
+function checkImagePath(path) {
+  if (!isAbsolute(path)) throw new Error(`path must be absolute: ${path}`);
+  if (!IMAGE_PATH.test(path)) {
+    throw new Error(`path must end in an image format Aseprite supports (.aseprite, .png, .gif, ...): ${path}`);
+  }
+}
 const FILE_FIELDS = new Set(["rows", "palette", "x", "y", "stamps", "place", "frames", "duration"]);
 
 // Drawing data from a .json file. Errors never echo file contents.
+async function insideAllowedDir(real) {
+  for (const dir of FILE_DIRS) {
+    const root = await realpath(dir).catch(() => null);
+    if (root && (real === root || real.startsWith(root.endsWith(sep) ? root : root + sep))) return true;
+  }
+  return false;
+}
+
 async function loadDrawingFile(path, schema, what) {
   if (!isAbsolute(path)) throw new Error(`file must be an absolute path: ${path}`);
   if (!path.toLowerCase().endsWith(".json")) throw new Error(`file must be a .json file: ${path}`);
-  let info;
+  let real, info;
   try {
-    info = await stat(path);
+    real = await realpath(path); // resolves symlinks, so they cannot point outside the allowed directories
+    info = await stat(real);
   } catch {
     throw new Error(`Cannot read file: ${path}`);
   }
+  if (!(await insideAllowedDir(real))) {
+    throw new Error(`file must be inside ${FILE_DIRS.join(" or ")} (set ASEPRITE_MCP_FILE_DIRS to allow other directories): ${path}`);
+  }
   if (!info.isFile()) throw new Error(`Not a file: ${path}`);
+  if (typeof process.getuid === "function" && info.uid !== process.getuid()) {
+    throw new Error(`file must belong to the current user: ${path}`);
+  }
   if (info.size > MAX_FILE_BYTES) throw new Error(`File too large (${info.size} > ${MAX_FILE_BYTES} bytes): ${path}`);
   let data;
   try {
-    data = JSON.parse(await readFile(path, "utf8"));
+    data = JSON.parse(await readFile(real, "utf8"));
   } catch {
     throw new Error(`File is not valid JSON: ${path}`);
   }
@@ -380,6 +412,13 @@ async function loadDrawingFile(path, schema, what) {
     throw new Error(`File does not contain valid ${what} data (${path}): ${why}`);
   }
   return parsed.data;
+}
+
+// "ab.." -> "ab" (a regex like /\.+$/ is quadratic on long rows)
+function trimDots(row) {
+  let end = row.length;
+  while (end > 0 && row[end - 1] === ".") end--;
+  return row.slice(0, end);
 }
 
 // Only the arguments that were actually passed
@@ -434,7 +473,7 @@ function hexRowsToPixelMap(rawRows, preferred = {}, { eraseKey } = {}) {
       palette[k] ??= shortHex(h);
       row += k;
     }
-    return row.replace(/\.+$/, "");
+    return trimDots(row);
   });
   return { palette, rows };
 }
@@ -447,7 +486,7 @@ async function loadPalettes() {
     return all;
   } catch (err) {
     if (err.code === "ENOENT") return {};
-    throw new Error(`Could not read ${PALETTE_FILE}: ${err.message}`);
+    throw new Error(`Could not read ${PALETTE_FILE}: ${err.code ?? "not a valid palette file"}`);
   }
 }
 
@@ -768,7 +807,7 @@ const ops = {
       palette = await resolvePalette({ palette: { ...filePalette, ...palette }, paletteName });
       if (!palette || !Object.keys(palette).length) throw new Error("Pass palette or paletteName (or a palette in the file).");
       if (!data.rows?.length && !data.place?.length) throw new Error("Nothing to draw: pass rows, place or file.");
-      const pixels = composePixelMap({ palette, ...data });
+      const pixels = composePixelMap({ palette, ...data, hideChars: Boolean(file) });
       if (!pixels.length) return { drawn: 0 };
       return call("set_pixels", { ...rest, pixels });
     },
@@ -921,6 +960,7 @@ const ops = {
     returnsInfo: true,
     run: async ({ frames, stamps, file, palette, paletteName, start, copyPrevious, duration, layer }) => {
       let filePalette;
+      const fromFile = Boolean(file);
       if (file) {
         const f = await loadDrawingFile(file, animationFile, "animation");
         const fromFile = Array.isArray(f) ? { frames: f } : f;
@@ -942,7 +982,7 @@ const ops = {
             await call("frame", { action: "new", frame: n - 1, copy: copyPrevious });
             count++;
           }
-          const pixels = composePixelMap({ palette: { ...shared, ...f.palette }, rows: f.rows, x: f.x, y: f.y, stamps, place: f.place });
+          const pixels = composePixelMap({ palette: { ...shared, ...f.palette }, rows: f.rows, x: f.x, y: f.y, stamps, place: f.place, hideChars: fromFile });
           if (pixels.length) await call("set_pixels", { pixels, layer, frame: n });
           const d = f.duration ?? duration;
           if (d) await call("frame", { action: "duration", frame: n, duration: d });
@@ -1000,7 +1040,10 @@ const ops = {
       path: z.string().optional().describe("Absolute path including extension (.aseprite, .png, .gif, ...)"),
       copy: z.boolean().default(false),
     },
-    run: (a) => call("save", a),
+    run: (a) => {
+      if (a.path) checkImagePath(a.path);
+      return call("save", a);
+    },
   },
 };
 
@@ -1028,7 +1071,10 @@ tool(
     description: "Opens a file (.aseprite, .png, .gif, ...) as the active sprite.",
     inputSchema: { path: z.string().describe("Absolute path") },
   },
-  async (a) => asText(await call("open", a))
+  async (a) => {
+    checkImagePath(a.path);
+    return asText(await call("open", a));
+  }
 );
 
 for (const [name, op] of Object.entries(ops)) {
@@ -1205,7 +1251,7 @@ tool(
     const s = await call("selection", { mask });
     if (s.empty) return asText({ empty: true });
     const out = { x: s.x, y: s.y, w: s.width, h: s.height };
-    if (s.mask) out.mask = s.mask.map((r) => r.replace(/\.+$/, ""));
+    if (s.mask) out.mask = s.mask.map(trimDots);
     return asText(out);
   }
 );
@@ -1269,7 +1315,8 @@ tool(
       const res = await getPixels({ rect: a.rect, frame: a.frame, flatten: true });
       const grid = parseHexGrid(res.rows);
       const w = res.width, h = res.height;
-      const scale = a.scale ?? Math.max(1, Math.min(16, Math.floor(192 / Math.max(w, h))));
+      // at most ~1024 px per panel, whatever scale was asked for
+      const scale = Math.max(1, Math.min(a.scale ?? Math.floor(192 / Math.max(w, h)), 16, Math.floor(1024 / Math.max(w, h))));
       const list = panels ?? ["color", "gray", "silhouette", "1x"];
       const sheet = critiqueSheet(grid, list, scale);
       const colors = new Set(grid.flat().filter((p) => p[3] > 0).map((p) => p.join(","))).size;

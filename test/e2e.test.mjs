@@ -7,7 +7,7 @@ import { createInterface } from "node:readline";
 import { createHmac, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import WebSocket, { WebSocketServer } from "ws";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -681,5 +681,68 @@ test("new tools explain when the extension is too old", async () => {
   } finally {
     fake.close();
     await mcp.close();
+  }
+});
+
+test("security limits", async () => {
+  const token = randomBytes(24).toString("hex");
+  const port = portCounter++;
+  const allowed = mkdtempSync(join(tmpdir(), "aseprite-mcp-allowed-"));
+  const other = mkdtempSync(join(tmpdir(), "aseprite-mcp-other-"));
+  const mcp = await startServer(token, port, { ASEPRITE_MCP_FILE_DIRS: allowed });
+  const fake = await fakeAseprite(token, port, (msg) => {
+    if (msg.cmd === "set_pixels") return { drawn: msg.args.pixels.length };
+    if (msg.cmd === "get_pixels") return { x: 0, y: 0, width: 3, height: 2, frame: 1, rows: ["ff0000ff".repeat(3), "00000000".repeat(3)] };
+    if (msg.cmd === "selection") return { empty: false, x: 0, y: 0, width: 200000, height: 1, mask: [".".repeat(199999) + "#"] };
+    return {};
+  }, "0.6.0");
+  const err = async (name, args) => {
+    const r = await mcp.callTool({ name, arguments: args });
+    assert.ok(r.isError, `${name} ${JSON.stringify(args).slice(0, 80)} should fail`);
+    return r.content[0].text;
+  };
+  try {
+    // file: only inside ASEPRITE_MCP_FILE_DIRS, symlinks resolved
+    const outside = join(other, "secret.json");
+    writeFileSync(outside, JSON.stringify(["SECRETROW"]));
+    assert.match(await err("aseprite_pixel_map", { file: outside, palette: { a: "#000" } }), /must be inside/);
+    symlinkSync(outside, join(allowed, "link.json"));
+    assert.match(await err("aseprite_pixel_map", { file: join(allowed, "link.json"), palette: { a: "#000" } }), /must be inside/);
+    // characters from a file never show up in errors
+    writeFileSync(join(allowed, "rows.json"), JSON.stringify(["SECRETROW"]));
+    const msg = await err("aseprite_pixel_map", { file: join(allowed, "rows.json"), palette: { a: "#000" } });
+    assert.match(msg, /Characters not in palette: some characters in the file\./);
+    assert.doesNotMatch(msg, /"S"|"E"|"C"|"R"|"T"|"O"|"W"/);
+    writeFileSync(join(allowed, "anim.json"), JSON.stringify([{ rows: ["XYZ"] }]));
+    assert.doesNotMatch(await err("aseprite_animation", { file: join(allowed, "anim.json"), palette: { a: "#000" } }), /"X"/);
+
+    // open/save only image formats with absolute paths
+    for (const path of ["/home/user/.bashrc", "/tmp/evil.sh", "relative.png", "/tmp/x.png.json"]) {
+      assert.match(await err("aseprite_save", { path, copy: true }), /path must/);
+      assert.match(await err("aseprite_open", { path }), /path must/);
+    }
+    assert.equal(fake.cmds.filter((m) => m.cmd === "save" || m.cmd === "open").length, 0);
+
+    // overly long rows and too many placed pixels are refused
+    assert.match(await err("aseprite_pixel_map", { palette: { a: "#000" }, rows: ["a".repeat(5000)] }), /4096|too_big|Too big/i);
+    const big = Array.from({ length: 64 }, () => "a".repeat(64));
+    const place = Array.from({ length: 70 }, (_, i) => ["s", i, 0]);
+    assert.match(await err("aseprite_pixel_map", { palette: { a: "#000" }, stamps: { s: { rows: big } }, place }), /Too many pixels before merging/);
+
+    // critique never builds a huge image
+    const r = await mcp.callTool({ name: "aseprite_view", arguments: { critique: true, scale: 64, panels: ["color", "gray", "silhouette", "deutan", "1x"] } });
+    assert.ok(!r.isError, r.content[0].text);
+    assert.equal(JSON.parse(r.content[1].text).scale, 16);
+
+    // long selection masks are trimmed quickly
+    const t0 = Date.now();
+    const sel = await mcp.callTool({ name: "aseprite_selection", arguments: { mask: true } });
+    assert.ok(!sel.isError);
+    assert.ok(Date.now() - t0 < 1000, `took ${Date.now() - t0} ms`);
+  } finally {
+    fake.close();
+    await mcp.close();
+    rmSync(allowed, { recursive: true, force: true });
+    rmSync(other, { recursive: true, force: true });
   }
 });

@@ -15,8 +15,9 @@ All trademarks belong to their respective owners.
   draw over, clear, or delete layers, frames, and pixels.
 - `aseprite_save` and `aseprite_open` can read and **overwrite any file your user account can access**.
 - `aseprite_palette` writes saved palettes to `~/.config/aseprite-mcp/palettes.json`.
-- The `file` option of `aseprite_pixel_map` / `aseprite_animation` reads any `.json` file your user
-  account can access. Only drawing data is used, and error messages never include the file's contents.
+- The `file` option of `aseprite_pixel_map` / `aseprite_animation` reads `.json` files of your user
+  account from the temp directory (or `ASEPRITE_MCP_FILE_DIRS`). Only drawing data is used, and error
+  messages never include the file's contents – but drawn data can be read back as pixels.
 - Changes made in Aseprite appear in the undo history, but saved files cannot be undone that way.
 
 **Save your work and keep backups before connecting an assistant.** The authors are not responsible
@@ -30,7 +31,9 @@ when you don't need it.
 
 ## Security
 
-- The pairing token protects the connection between server and extension. Keep it private. If you
+- The pairing token protects the connection between server and extension. Keep it private. Aseprite
+  stores it in a preferences file that other users of the computer can read by default
+  (`chmod 700 ~/.config/aseprite` on shared computers). If you
   think it has leaked, run `node server.mjs token --new` and enter the new token in Aseprite.
 - The connection is limited to `127.0.0.1`, but other software running under your user account may
   still be able to read the token file or interfere with the process.

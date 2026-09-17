@@ -153,7 +153,14 @@ in error messages.
 - `aseprite_run_lua` needs **two** opt-ins: the server must be started with
   `ASEPRITE_MCP_ALLOW_LUA=1`, **and** *Allow arbitrary Lua code* must be ticked in the
   MCP Bridge window. Only enable it if you trust what your assistant is doing.
-- `aseprite_open` / `aseprite_save` can read and write any path your user can access.
+- `aseprite_open` / `aseprite_save` can read and write any path your user can access, but only
+  files with an image format Aseprite supports (`.aseprite`, `.png`, `.gif`, …) and absolute paths.
+- The `file` option of `aseprite_pixel_map` / `aseprite_animation` only reads `.json` files that
+  belong to you and lie in the system temp directory (or in `ASEPRITE_MCP_FILE_DIRS`); symlinks
+  are resolved first, and error messages never contain the file's contents.
+- Aseprite stores the token in the extension's preferences
+  (`~/.config/aseprite/extensions/aseprite-mcp-bridge/__pref.lua`), which is readable by other
+  users of the computer by default. On a shared computer run `chmod 700 ~/.config/aseprite`.
 - `aseprite_palette` stores palettes in `~/.config/aseprite-mcp/palettes.json`.
 
 ## Configuration
@@ -166,6 +173,7 @@ in error messages.
 | `ASEPRITE_MCP_TOKEN` | – | Use this token instead of the token file |
 | `ASEPRITE_MCP_TOKEN_FILE` | see above | Token file location |
 | `ASEPRITE_MCP_PALETTE_FILE` | `~/.config/aseprite-mcp/palettes.json` | Where `aseprite_palette` stores palettes |
+| `ASEPRITE_MCP_FILE_DIRS` | system temp directory | Directories the `file` option may read from (separated by `:`, on Windows `;`) |
 
 Example with Claude Code:
 

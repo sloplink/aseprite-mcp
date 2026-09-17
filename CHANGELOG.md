@@ -19,6 +19,10 @@ Needs the MCP Bridge extension **0.6.0** for `aseprite_selection`, `aseprite_cha
 - `aseprite_palette` action `ramp`: hue-shifted shading ramps from base colours.
 - `aseprite_outline` (also in `aseprite_batch`): selective outline ("sel-out") or a solid
   outline, outside or inside the shapes.
+- Security: `file` only reads your own `.json` files from the temp directory or
+  `ASEPRITE_MCP_FILE_DIRS` and never repeats their characters in errors; `aseprite_open` /
+  `aseprite_save` only accept absolute paths with image formats; rows are limited to 4096
+  characters; the critique sheet is capped in size; GitHub Actions are pinned to commits.
 - Ramps and selective outlines are computed in OKLCH (perceptual lightness), so pale colours
   get muted shadows instead of saturated orange, and yellow shadows turn warm, not green.
 
