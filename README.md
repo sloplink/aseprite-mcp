@@ -6,6 +6,9 @@ Let an AI assistant draw live in your running **Aseprite** via the
 > Unofficial community project. Not affiliated with or endorsed by Anthropic or **Igara Studio (Aseprite)**.
 > **Use at your own risk** – see [DISCLAIMER.md](DISCLAIMER.md).
 
+<img width="198" height="391" alt="runner" src="https://github.com/user-attachments/assets/01d4661b-0e6f-4f6c-91dc-87c7177c3f47" />
+run animation prototype
+
 ```
 MCP client ⇄ stdio ⇄ aseprite-mcp ⇄ WebSocket 127.0.0.1 ⇄ Aseprite + MCP Bridge extension
 ```
