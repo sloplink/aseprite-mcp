@@ -23,9 +23,11 @@ text format.
 
 ## Requirements
 
-- Aseprite **v1.3 or later**
-- Node.js 20+
-- An MCP client that runs local (stdio) servers, e.g. [Claude Code](https://code.claude.com/docs)
+- Aseprite **v1.3 or later** (Windows, macOS or Linux; the Steam version works too)
+- Node.js 20+ (some Linux distributions ship older versions – use [nodejs.org](https://nodejs.org) or a version manager)
+- An MCP client that runs local (stdio) servers, e.g. Claude Code, Claude Desktop, Cursor,
+  VS Code (GitHub Copilot), Windsurf, Gemini CLI or Codex CLI. Clients that only support remote
+  (HTTP) servers, such as ChatGPT, cannot use it.
 
 ## Installation
 
@@ -66,7 +68,9 @@ Claude Code:
 claude mcp add --scope user aseprite -- node /absolute/path/to/aseprite-mcp/server.mjs
 ```
 
-Other clients (JSON config):
+Claude Desktop, Cursor, Windsurf, Gemini CLI, Cline and most other clients use this JSON
+(`claude_desktop_config.json`, `~/.cursor/mcp.json`, `~/.codeium/windsurf/mcp_config.json`,
+`~/.gemini/settings.json`, …):
 
 ```json
 {
@@ -78,6 +82,30 @@ Other clients (JSON config):
   }
 }
 ```
+
+VS Code (`.vscode/mcp.json`):
+
+```json
+{
+  "servers": {
+    "aseprite": { "type": "stdio", "command": "node", "args": ["/absolute/path/to/aseprite-mcp/server.mjs"] }
+  }
+}
+```
+
+Codex CLI (`~/.codex/config.toml`):
+
+```toml
+[mcp_servers.aseprite]
+command = "node"
+args = ["/absolute/path/to/aseprite-mcp/server.mjs"]
+```
+
+On Windows write the path as `C:/Users/you/aseprite-mcp/server.mjs` (or with `\\` in JSON).
+
+**Notes for other assistants:** the server sends a usage guide as MCP instructions; if your client
+ignores them, ask the assistant to call `aseprite_help` first. If your client cannot show images
+from tools, the assistant can still check its work with `aseprite_read_pixels`.
 
 ## Usage
 
@@ -94,6 +122,7 @@ The order of steps 1 and 2 does not matter; the bridge reconnects automatically.
 | Tool | Purpose |
 |---|---|
 | `aseprite_status` | Connection and sprite info (size, layers, frames) |
+| `aseprite_help` | The usage guide, for clients that ignore server instructions |
 | `aseprite_new_sprite`, `aseprite_open`, `aseprite_save` | Create, open, save or export |
 | `aseprite_pixel_map` | Draw exact pixels from a palette + text rows – the cheapest way to draw (~10× less input than `set_pixels`) |
 | `aseprite_set_pixels` | Set a few exact pixels (one undo step) |
@@ -191,6 +220,10 @@ claude mcp add --scope user --env ASEPRITE_MCP_ALLOW_LUA=1 aseprite -- node /abs
   from the same release as the server and restart Aseprite.
 - **New tools missing in the assistant** – restart the MCP client (Claude Code: `/mcp` → reconnect).
 - Aseprite may ask for permission the first time the extension opens a network connection; allow it.
+- **Aseprite in a sandbox (e.g. Flatpak Steam)** – it has its own `/tmp`. Images up to 128×128 px are
+  sent directly and work anyway; for larger `aseprite_view` calls pass a smaller `rect`. `open`/`save`
+  paths must be visible inside the sandbox.
+- **The assistant draws badly or wastes tokens** – make sure it read the usage guide (`aseprite_help`).
 
 ## Development
 

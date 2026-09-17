@@ -621,6 +621,13 @@ test("critique sheet, selection, watch mode, ramps and outline", async () => {
     assert.deepEqual(meta, { panels: ["color", "gray", "silhouette", "1x"], scale: 4, rect: [0, 0, 3, 2], colors: 3, frame: 1 });
     assert.equal(fake.cmds.at(-1).args.flatten, true);
 
+    // normal view is rendered by the server from raw pixels (no shared temp file)
+    const v = await ok("aseprite_view", { scale: 5, grid: true });
+    const vpng = Buffer.from(v.content[0].data, "base64");
+    assert.deepEqual([vpng.readUInt32BE(16), vpng.readUInt32BE(20)], [15, 10]);
+    assert.deepEqual(JSON.parse(v.content[1].text), { frame: 1, scale: 5, rect: [0, 0, 3, 2], imageWidth: 15, imageHeight: 10 });
+    assert.equal(fake.cmds.filter((m) => m.cmd === "snapshot").length, 0);
+
     // "selection" as rect
     await ok("aseprite_read_pixels", { rect: "selection" });
     assert.deepEqual(fake.cmds.at(-1).args.rect, [1, 0, 2, 2]);
@@ -751,5 +758,49 @@ test("security limits", async () => {
     await mcp.close();
     rmSync(allowed, { recursive: true, force: true });
     rmSync(other, { recursive: true, force: true });
+  }
+});
+
+test("tool schemas stay compatible with strict MCP clients", async () => {
+  const mcp = await startServer(randomBytes(24).toString("hex"), portCounter++);
+  try {
+    const { tools } = await mcp.listTools();
+    const bad = [];
+    const walk = (node, where) => {
+      if (Array.isArray(node)) return node.forEach((n) => walk(n, where));
+      if (!node || typeof node !== "object") return;
+      for (const [k, v] of Object.entries(node)) {
+        if ((k === "items" && Array.isArray(v)) || ["prefixItems", "additionalItems", "const", "propertyNames", "$ref", "not"].includes(k)) {
+          bad.push(`${where}: ${k}`);
+        }
+        walk(v, where);
+      }
+    };
+    for (const t of tools) {
+      assert.match(t.name, /^[a-z0-9_]{1,64}$/);
+      assert.ok(t.description && t.description.length < 1200, `${t.name} description length`);
+      walk(t.inputSchema, t.name);
+    }
+    assert.deepEqual(bad, []);
+    const help = await mcp.callTool({ name: "aseprite_help", arguments: {} });
+    assert.match(help.content[0].text, /pixel_map/);
+
+    // the exact shapes are still enforced by the server
+    for (const [name, args] of [
+      ["aseprite_draw", { tool: "line", points: [[0, 0, 1]] }],
+      ["aseprite_set_pixels", { pixels: [["0", 0, "#fff"]] }],
+      ["aseprite_set_pixels", { pixels: [[0, 0]] }],
+      ["aseprite_clear", { rect: [0, 0, 0, 5] }],
+      ["aseprite_clear", { rect: "everything" }],
+      ["aseprite_pixel_map", { palette: { ab: "#fff" }, rows: ["a"] }],
+      ["aseprite_pixel_map", { palette: { a: "#fff" }, stamps: { s: { rows: ["a"] } }, place: [["s", 0, 0, "x"]] }],
+      ["aseprite_pixel_map", { palette: { a: "#fff" }, stamps: { s: { rows: ["a"] } }, place: [[0, 0, "s"]] }],
+    ]) {
+      const r = await mcp.callTool({ name, arguments: args });
+      assert.ok(r.isError, `${name} ${JSON.stringify(args)} should be rejected`);
+      assert.doesNotMatch(r.content[0].text, /not connected/, `${name} must fail validation, not at the connection`);
+    }
+  } finally {
+    await mcp.close();
   }
 });

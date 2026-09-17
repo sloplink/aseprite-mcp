@@ -645,7 +645,7 @@ function H.run_lua(a)
   if not H._allowLua() then
     error("run_lua is disabled. Enable 'Allow arbitrary Lua code' in the MCP Bridge window in Aseprite.")
   end
-  local chunk, err = load(a.code, "=claude", "t")
+  local chunk, err = load(a.code, "=lua", "t")
   if not chunk then error("Syntax error: " .. tostring(err)) end
   local printed = {}
   local oldPrint = print

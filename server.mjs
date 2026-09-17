@@ -255,27 +255,40 @@ const color = z
   .string()
   .regex(/^#?([0-9a-fA-F]{3}|[0-9a-fA-F]{4}|[0-9a-fA-F]{6}|[0-9a-fA-F]{8})$/)
   .describe("Hex color: #rgb, #rgba, #rrggbb or #rrggbbaa");
-const point = z.tuple([z.number().int(), z.number().int()]);
+// Schemas avoid tuples, const and propertyNames: several MCP clients (e.g. Gemini) reject them.
+// The exact shape is checked here instead.
+const int = z.number().int();
+const point = z.array(int).length(2).describe("[x, y]");
 const target = {
   layer: z.string().optional().describe("Layer name (default: active layer)"),
   frame: z.number().int().min(1).optional().describe("Frame number, 1-based (default: active frame)"),
 };
 const MAX_PIXELS = 65536;
-const rect = z.tuple([z.number().int(), z.number().int(), z.number().int().min(1), z.number().int().min(1)]);
-const mapPalette = z.record(z.string().length(1), color);
+const rect = z
+  .array(int)
+  .length(4)
+  .refine((r) => r[2] >= 1 && r[3] >= 1, "rect is [x, y, width, height] with width and height >= 1");
+const mapPalette = z
+  .object({})
+  .catchall(color)
+  .refine((p) => Object.keys(p).every((k) => k.length === 1), "palette keys must be single characters");
 const rowsSchema = z.array(z.string().max(4096)).max(4096);
 const stampsSchema = z
-  .record(
-    z.string().min(1).max(64),
-    z.object({ rows: rowsSchema.min(1), palette: mapPalette.optional() }).strict()
-  )
+  .object({})
+  .catchall(z.object({ rows: rowsSchema.min(1), palette: mapPalette.optional() }).strict())
+  .refine((st) => Object.keys(st).every((k) => k.length >= 1 && k.length <= 64), "stamp names must be 1-64 characters")
   .describe('Reusable pixel maps: {"name": {"rows": [...], "palette"?: {...}}}');
 const placeSchema = z
   .array(
-    z.union([
-      z.tuple([z.string(), z.number().int(), z.number().int()]),
-      z.tuple([z.string(), z.number().int(), z.number().int(), z.enum(["h", "v", "hv"])]),
-    ])
+    z
+      .array(z.union([z.string(), int]))
+      .min(3)
+      .max(4)
+      .refine(
+        ([name, x, y, flip, ...rest]) =>
+          typeof name === "string" && Number.isInteger(x) && Number.isInteger(y) && [undefined, "h", "v", "hv"].includes(flip) && !rest.length,
+        'each place entry is [name, x, y] or [name, x, y, "h"|"v"|"hv"]'
+      )
   )
   .max(4096)
   .describe('Stamps to draw after rows, in order: [name, x, y] or [name, x, y, "h"|"v"|"hv"] (flip); x/y relative to the map');
@@ -287,7 +300,7 @@ const paletteName = z
   .regex(/^[A-Za-z0-9][\w .-]{0,63}$/, "letters, digits, space, _ . - (max 64, starting with a letter or digit)")
   .describe("Name of a palette saved with aseprite_palette");
 
-const region = z.union([rect, z.literal("selection")]);
+const region = z.union([rect, z.enum(["selection"])]);
 
 // "selection" -> bounding box of the artist's current selection
 async function resolveRect(r) {
@@ -646,6 +659,35 @@ const DEUTAN = [
   [0, 0.3, 0.7],
 ];
 
+// Same look as the extension's snapshot: upscaled, checkerboard behind transparency, optional grid
+const MAX_VIEW_PIXELS = 4096 * 4096;
+function renderView(grid, { scale, checker = true, gridLines = false }) {
+  const h = grid.length, w = grid[0]?.length ?? 0;
+  const W = w * scale, H = h * scale;
+  if (W * H > MAX_VIEW_PIXELS) throw new Error(`Image would be ${W}x${H} px; use a smaller scale or rect.`);
+  const out = Buffer.alloc(W * H * 4);
+  const cs = scale >= 4 ? Math.max(2, Math.floor(scale / 2)) : 4;
+  for (let y = 0; y < H; y++) {
+    for (let x = 0; x < W; x++) {
+      let [r, g, b, a] = grid[Math.floor(y / scale)][Math.floor(x / scale)];
+      if (checker) {
+        const bg = (Math.floor(x / cs) + Math.floor(y / cs)) % 2 === 0 ? 204 : 255;
+        const t = a / 255;
+        [r, g, b, a] = [r * t + bg * (1 - t), g * t + bg * (1 - t), b * t + bg * (1 - t), 255];
+      }
+      [r, g, b, a] = [r, g, b, a].map(Math.floor);
+      if (gridLines && scale >= 4) {
+        // like the extension: grid crossings are darkened once per direction
+        for (const onLine of [x % scale === 0, y % scale === 0]) {
+          if (onLine) [r, g, b, a] = [r, g, b].map((v) => Math.floor(v * 0.7)).concat(255);
+        }
+      }
+      out.set([r, g, b, a], (y * W + x) * 4);
+    }
+  }
+  return { png: encodePng(W, H, out), width: W, height: H };
+}
+
 function critiqueSheet(grid, panels, scale) {
   const h = grid.length, w = grid[0]?.length ?? 0;
   const sizes = panels.map((p) => (p === "1x" ? 1 : scale));
@@ -821,7 +863,12 @@ const ops = {
       "For more than a few pixels prefer aseprite_pixel_map (far fewer tokens).",
     shape: {
       pixels: z
-        .array(z.tuple([z.number().int(), z.number().int(), color]))
+        .array(
+          z
+            .array(z.union([int, color]))
+            .length(3)
+            .refine((p) => Number.isInteger(p[0]) && Number.isInteger(p[1]) && typeof p[2] === "string", "each pixel is [x, y, color]")
+        )
         .min(1)
         .max(MAX_PIXELS)
         .describe("List of [x, y, color]"),
@@ -1067,6 +1114,19 @@ tool(
 );
 
 tool(
+  "aseprite_help",
+  {
+    title: "Usage guide",
+    description:
+      "Returns the short usage guide (efficient workflow, pixel_map format, stamps, pixel-art tips). " +
+      "Read it once before drawing if your client did not show the server instructions.",
+    inputSchema: {},
+    annotations: { readOnlyHint: true },
+  },
+  async () => asText(INSTRUCTIONS ?? "No usage guide found (instructions.md is missing).")
+);
+
+tool(
   "aseprite_open",
   {
     title: "Open file",
@@ -1298,6 +1358,7 @@ tool(
     description:
       "Renders the visible, flattened frame as an upscaled PNG so you can look at and check the result yourself. Transparency is shown as a checkerboard. " +
       "Use rect to zoom into a detail. Call it once after a drawing pass, not after every step. " +
+      "If your client cannot show images, use aseprite_read_pixels instead. " +
       "critique=true instead returns ONE small sheet for self-review: colour, grayscale (value/contrast check), black silhouette " +
       "(readability) and true 1x size; add 'deutan' to panels for a colour-blindness check. Max 128x128 px (or pass rect).",
     inputSchema: {
@@ -1329,10 +1390,33 @@ tool(
         ],
       };
     }
+    // Rendered here from raw pixels, so no file has to be shared with Aseprite (which may run in a
+    // sandbox with its own /tmp, e.g. Flatpak). Only very large images still use a temporary file.
+    let res = null;
+    try {
+      res = await getPixels({ rect: a.rect, frame: a.frame, flatten: true });
+    } catch (err) {
+      if (!/too large/i.test(err.message)) throw err;
+    }
+    if (res) {
+      const scale = a.scale ?? Math.max(1, Math.min(64, Math.floor(512 / Math.max(res.width, res.height))));
+      const img = renderView(parseHexGrid(res.rows), { scale, checker: a.checker, gridLines: a.grid });
+      const info = { frame: res.frame, scale, rect: [res.x, res.y, res.width, res.height], imageWidth: img.width, imageHeight: img.height };
+      return {
+        content: [
+          { type: "image", data: img.png.toString("base64"), mimeType: "image/png" },
+          { type: "text", text: JSON.stringify(info) },
+        ],
+      };
+    }
     const path = join(tmpdir(), `aseprite-mcp-${randomUUID()}.png`);
     try {
       const info = await call("snapshot", { ...a, path });
-      const data = (await readFile(path)).toString("base64");
+      const data = await readFile(path)
+        .then((b) => b.toString("base64"))
+        .catch(() => {
+          throw new Error("Aseprite rendered the image, but the server cannot read it (sandboxed Aseprite?). Use a smaller rect.");
+        });
       return {
         content: [
           { type: "image", data, mimeType: "image/png" },

@@ -19,6 +19,10 @@ Needs the MCP Bridge extension **0.6.0** for `aseprite_selection`, `aseprite_cha
 - `aseprite_palette` action `ramp`: hue-shifted shading ramps from base colours.
 - `aseprite_outline` (also in `aseprite_batch`): selective outline ("sel-out") or a solid
   outline, outside or inside the shapes.
+- Compatibility: tool schemas no longer use tuples, `const` or `propertyNames` (rejected by
+  some MCP clients such as Gemini); new `aseprite_help` returns the usage guide for clients that
+  ignore server instructions; `aseprite_view` is rendered by the server for images up to
+  128×128 px, so it also works when Aseprite runs in a sandbox with its own `/tmp`.
 - Security: `file` only reads your own `.json` files from the temp directory or
   `ASEPRITE_MCP_FILE_DIRS` and never repeats their characters in errors; `aseprite_open` /
   `aseprite_save` only accept absolute paths with image formats; rows are limited to 4096
