@@ -11,6 +11,29 @@ local EXTENSION_VERSION = "0.4.0"
 
 H.VERSION = EXTENSION_VERSION
 
+-- Aseprite's json.decode returns userdata objects whose numbers are all floats
+-- (5 -> 5.0, even after assignment). Convert to plain Lua tables with integers.
+-- Arrays only iterate by index; objects only via pairs.
+function H._fromJson(v, depth)
+  depth = depth or 0
+  local t = type(v)
+  if t == "number" then
+    -- only whole numbers: Aseprite's math.tointeger(1.5) returns 1
+    if v == math.floor(v) and v >= math.mininteger and v <= math.maxinteger then return math.floor(v) end
+    return v
+  end
+  if (t == "table" or t == "userdata") and depth < 8 then
+    local o = {}
+    if v[1] ~= nil then
+      for i = 1, #v do o[i] = H._fromJson(v[i], depth + 1) end
+    else
+      for k, val in pairs(v) do o[k] = H._fromJson(val, depth + 1) end
+    end
+    return o
+  end
+  return v
+end
+
 -- Set by plugin.lua: function() -> boolean
 H._allowLua = function() return false end
 
@@ -209,6 +232,25 @@ function H.open(a)
   return H.info()
 end
 
+-- Formats whose export options dialog Aseprite shows before saving
+-- ("GIF Options" etc.). It would block the editor until someone closes it.
+local OPTION_DIALOG_FORMATS = { "gif", "jpeg", "webp", "tga", "svg", "css" }
+
+local function withoutOptionDialogs(fn)
+  local saved = {}
+  for _, f in ipairs(OPTION_DIALOG_FORMATS) do
+    pcall(function()
+      saved[f] = app.preferences[f].show_alert
+      app.preferences[f].show_alert = false
+    end)
+  end
+  local ok, err = pcall(fn)
+  for f, v in pairs(saved) do
+    pcall(function() app.preferences[f].show_alert = v end)
+  end
+  if not ok then error(err, 0) end
+end
+
 function H.save(a)
   local s = needSprite()
   local path = a.path
@@ -218,7 +260,16 @@ function H.save(a)
     end
     path = s.filename
   end
-  if a.copy then s:saveCopyAs(path) else s:saveAs(path) end
+  -- ui=false skips the file chooser; the format option dialogs need the preferences switched off
+  withoutOptionDialogs(function()
+    if a.copy then
+      app.command.SaveFileCopyAs{ ui = false, filename = path }
+    elseif path == s.filename then
+      app.command.SaveFile{ ui = false }
+    else
+      app.command.SaveFileAs{ ui = false, filename = path }
+    end
+  end)
   return { saved = path, copy = a.copy and true or false }
 end
 

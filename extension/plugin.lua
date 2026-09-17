@@ -50,6 +50,11 @@ local function disconnect()
   end
 end
 
+-- "…/handlers.lua:112: message" -> "message"
+local function cleanError(e)
+  return (tostring(e):gsub("^[^\n]-%.lua:%d+: ", ""))
+end
+
 local function handleCommand(sock, msg)
   local name = msg.cmd
   local handler = (type(name) == "string" and name:sub(1, 1) ~= "_") and H[name] or nil
@@ -57,11 +62,11 @@ local function handleCommand(sock, msg)
   if type(handler) ~= "function" then
     reply = { id = msg.id, ok = false, error = "Unknown command: " .. tostring(name) }
   else
-    local ok, res = pcall(handler, msg.args or {})
+    local ok, res = pcall(function() return handler(H._fromJson(msg.args or {})) end)
     if ok then
       reply = { id = msg.id, ok = true, result = res or {} }
     else
-      reply = { id = msg.id, ok = false, error = tostring(res) }
+      reply = { id = msg.id, ok = false, error = cleanError(res) }
     end
     app.refresh()
   end

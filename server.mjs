@@ -671,7 +671,8 @@ tool(
           results.push(res);
         }
       } catch (err) {
-        throw new Error(`${where} failed: ${err?.message ?? err}. ${i} earlier op(s) were applied: ${JSON.stringify(results)}`);
+        const why = String(err?.message ?? err).replace(/\.$/, "");
+        throw new Error(`${where} failed: ${why}. ${i} earlier op(s) were applied: ${JSON.stringify(results)}`);
       }
     }
     const out = { results };

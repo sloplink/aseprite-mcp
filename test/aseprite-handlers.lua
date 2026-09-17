@@ -38,6 +38,18 @@ local function px(res, x, y)
   return row:sub(i + 1, i + 8)
 end
 
+case("_fromJson turns Aseprite JSON into plain tables with integers", function()
+  local a = H._fromJson(json.decode('{"frame":5,"x":1.5,"ok":true,"rect":[1,2,3,4],"pixels":[[0,1,"#fff"]],"e":[],"o":{}}'))
+  eq(type(a), "table"); eq(math.type(a.frame), "integer"); eq(a.x, 1.5); eq(a.ok, true)
+  eq(#a.rect, 4); eq(math.type(a.rect[4]), "integer")
+  eq(a.pixels[1][3], "#fff"); eq(math.type(a.pixels[1][2]), "integer")
+  eq(type(a.e), "table"); eq(next(a.e), nil); eq(next(a.o), nil)
+  H.new_sprite{ width = 1, height = 1 }
+  fails(function() H.frame(H._fromJson(json.decode('{"action":"delete","frame":5}'))) end, "Frame 5 does not exist")
+  local i = H.frame(H._fromJson(json.decode('{"action":"duration","frame":1,"duration":0.1}')))
+  eq(i.frameDurations[1], 0.1, "fractional duration survives")
+end)
+
 case("info without sprite", function()
   local i = H.info()
   eq(i.sprite, false, "sprite")
@@ -223,6 +235,11 @@ case("save, export and open", function()
   local png = app.fs.joinPath(tmp, "t.png")
   eq(H.save{ path = file }.saved, file)
   H.save{ path = png, copy = true }
+  local gif = app.fs.joinPath(tmp, "t.gif")
+  local before = app.preferences.gif.show_alert
+  H.save{ path = gif, copy = true }
+  eq(app.fs.isFile(gif), true, "gif exported")
+  eq(app.preferences.gif.show_alert, before, "gif alert preference restored")
   eq(app.sprite.filename, file, "copy keeps file name")
   H.save{}
   app.sprite:close()

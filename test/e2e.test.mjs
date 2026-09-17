@@ -100,6 +100,10 @@ test("handshake, commands and Lua permission", { skip }, async () => {
     r = await mcp.callTool({ name: "aseprite_draw", arguments: { tool: "line", points: [[0, 0], [1, 1]] } });
     assert.ok(r.isError);
     assert.match(r.content[0].text, /No active sprite/);
+    assert.doesNotMatch(r.content[0].text, /\.lua:\d+/, "no Lua source location in errors");
+
+    r = await mcp.callTool({ name: "aseprite_run_lua", arguments: { code: "local n = 5.0 error('frame ' .. n)" } });
+    assert.match(r.content[0].text, /frame 5\.0/, "plain Lua floats are left alone");
   } finally {
     lua.kill();
     await mcp.close();
@@ -228,7 +232,7 @@ test("pixel_map, batch and server instructions", async () => {
   const port = portCounter++;
   const mcp = await startServer(token, port);
   const fake = await fakeAseprite(token, port, (msg) => {
-    if (msg.cmd === "draw" && msg.args.tool === "curve") throw new Error("boom");
+    if (msg.cmd === "draw" && msg.args.tool === "curve") throw new Error("boom.");
     if (msg.cmd === "set_pixels") return { drawn: msg.args.pixels.length };
     if (["info", "layer", "frame"].includes(msg.cmd)) return { width: 8, layers: [{ name: "a" }] };
     return {};
@@ -293,6 +297,7 @@ test("pixel_map, batch and server instructions", async () => {
     });
     assert.ok(r.isError);
     assert.match(r.content[0].text, /op #2 \(draw\) failed: boom\. 1 earlier op/);
+    assert.doesNotMatch(r.content[0].text, /\.\./);
     assert.notEqual(fake.cmds.at(-1).args.action, "redo", "must stop at the first error");
   } finally {
     fake.close();

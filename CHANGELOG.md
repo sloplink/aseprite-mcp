@@ -28,6 +28,11 @@ Includes everything since 0.2.0 (0.3.0 was never released).
 - Indexed sprites: `new_sprite` background and `clear` used the wrong pixel value.
 - `aseprite_view` and `aseprite_frame` report a clear error for frames that do not exist.
 - `aseprite_open` no longer opens a modal error dialog in Aseprite for missing files.
+- `aseprite_save` no longer blocks on export option dialogs (e.g. "GIF Options");
+  the user's "don't show again" settings are left unchanged.
+- Numbers from the server are passed to the handlers as integers where they are whole
+  (error messages said "Frame 5.0"); fractional values such as durations stay intact.
+- Error messages no longer start with the Lua source location.
 
 ### Changed
 - Tool results are compact JSON (fewer tokens).
