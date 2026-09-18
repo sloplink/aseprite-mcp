@@ -239,6 +239,10 @@ buildDialog = function()
     end,
   }
   dlg:label{ id = "status", label = "Status:", text = statusText }
+  if authed then
+    -- closing the window disconnects, so say it where the user looks
+    dlg:label{ id = "hint", text = "Keep this window open to stay connected." }
+  end
   if not compact then
     dlg:separator{ text = "Settings" }
     dlg:entry{
