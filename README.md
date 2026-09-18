@@ -1,16 +1,27 @@
+<p align="center">
+<img width="484" height="84" alt="mcp_bridge_logo@4x" src="https://github.com/user-attachments/assets/33fc61c3-ee25-421b-b85f-72163dc0fd8a" /> <br>
+<h1>for Aseprite[Extension]</h1>
 
-# MCP for Aseprite[Extension]
+</p>
 
 Let an AI assistant draw live in your running **Aseprite** via the
 [Model Context Protocol](https://modelcontextprotocol.io).
 
 > Unofficial community project. Not affiliated with or endorsed by Anthropic or **Igara Studio (Aseprite)**.
 > **Use at your own risk** – see [DISCLAIMER.md](DISCLAIMER.md).
-
-A few samples:
-<img width="128" height="64" alt="fisch2" src="https://github.com/user-attachments/assets/98fd7591-6159-40c5-ada5-1b538365576f" />
-<img width="32" height="64" alt="anime_run" src="https://github.com/user-attachments/assets/d5768ae0-2b19-4942-83ac-dc6e8ee40098" />
-<img width="32" height="32" alt="apfelbiss" src="https://github.com/user-attachments/assets/3de9ed38-3c33-475b-a33f-0855eb85b070" />
+<p align="center">
+<img width="320" height="192" alt="castle_interior_map" src="https://github.com/user-attachments/assets/2ca144bd-3955-42c7-9058-13d746191122" />
+<img width="128" height="96" alt="castle_interior_tileset" src="https://github.com/user-attachments/assets/a9a89db1-3f7e-411c-9033-dac6098cac66" />
+  <br>
+"create me a map inside a dark medieval castle with dark wooden floor include a tilemap 16x16 for it"
+  <br>
+  <img width="16" height="24" alt="wizard_walk" src="https://github.com/user-attachments/assets/53ab0474-d9c5-426e-a3eb-b164056ac07c" />
+<img width="64" height="96" alt="wizard_walk_sheet" src="https://github.com/user-attachments/assets/dc714bf8-bf1d-48ec-b6f2-468dff3e43b3" />  <br>
+"now draw me a wizard for the castle interior and create a walk animation in all four directions"
+<img width="640" height="384" alt="wizard_showcase_outline@2x" src="https://github.com/user-attachments/assets/5d7ef4fb-0556-4e08-91f0-f2bdff2f17a1" />
+<br>
+Finished output
+</p>
 
 ```
 MCP client ⇄ stdio ⇄ aseprite-mcp ⇄ WebSocket 127.0.0.1 ⇄ Aseprite + MCP Bridge extension
@@ -24,8 +35,6 @@ Aseprite's undo history.
 Drawing is designed to be **cheap in tokens**: whole sprites are sent as a palette plus
 text rows, several steps fit into one call, and pixels can be read back in the same
 text format.
-
-> Unofficial community project. Not affiliated with or endorsed by Anthropic or Igara Studio.
 
 ## Requirements
 
