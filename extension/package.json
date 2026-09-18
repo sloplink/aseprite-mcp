@@ -2,7 +2,7 @@
   "name": "aseprite-mcp-bridge",
   "displayName": "MCP Bridge",
   "description": "Lets an AI assistant (e.g. Claude via the aseprite-mcp server) draw in Aseprite. Unofficial, not affiliated with Anthropic.",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "author": { "name": "sloplink", "url": "https://github.com/sloplink/aseprite-mcp" },
   "contributors": [],
   "publisher": "sloplink",

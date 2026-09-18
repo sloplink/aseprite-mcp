@@ -62,7 +62,11 @@ local function handleCommand(sock, msg)
   if type(handler) ~= "function" then
     reply = { id = msg.id, ok = false, error = "Unknown command: " .. tostring(name) }
   else
-    local ok, res = pcall(function() return handler(H._fromJson(msg.args or {})) end)
+    local ok, res = pcall(function()
+      local args = H._fromJson(msg.args or {})
+      H._guard(name, args)
+      return handler(args)
+    end)
     if ok then
       reply = { id = msg.id, ok = true, result = res or {} }
     else

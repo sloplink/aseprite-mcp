@@ -20,7 +20,7 @@ import { join, dirname, isAbsolute, sep, delimiter } from "node:path";
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from "node:crypto";
 import { deflateSync } from "node:zlib";
 
-const VERSION = "0.6.0";
+const VERSION = "0.7.0";
 const PROTOCOL = 2;
 // Oldest extension that has every command this server uses. Server-only releases keep it,
 // so they work with the installed extension.
@@ -209,7 +209,42 @@ function versionWarning() {
   );
 }
 
-function call(cmd, args = {}) {
+// ---------------------------------------------------------------------------
+// Target sprite: the sprite the assistant is working on. Every command that touches a sprite
+// carries its id ("expect"), and the extension refuses to run it if the artist switched tabs.
+// ---------------------------------------------------------------------------
+let targetSprite = null; // { id, name }
+const UNGUARDED = new Set(["new_sprite", "open", "sprites", "run_lua"]);
+const ADOPTS = new Set(["new_sprite", "open"]); // their result is the new target
+
+const guardSupported = () => compareVersions(extensionVersion, "0.7.0") >= 0;
+const setTarget = (info) => {
+  if (info && typeof info.spriteId === "string") targetSprite = { id: info.spriteId, name: info.name ?? "Sprite" };
+};
+
+// noExpect: run on whatever sprite is active (used by aseprite_status to adopt it)
+async function call(cmd, args = {}, { noExpect = false } = {}) {
+  if (guardSupported() && !UNGUARDED.has(cmd) && !noExpect) {
+    if (!targetSprite) setTarget(await send("info", {})); // first command: adopt the active sprite
+    if (targetSprite) args = { ...args, expect: targetSprite.id };
+  }
+  try {
+    const res = await send(cmd, args);
+    if (ADOPTS.has(cmd)) setTarget(res);
+    return res;
+  } catch (err) {
+    if (/ACTIVE_SPRITE_CHANGED/.test(err.message)) {
+      throw new Error(
+        `${err.message.replace("ACTIVE_SPRITE_CHANGED: ", "The artist switched sprites: ")} Nothing was changed. ` +
+          `To continue on '${targetSprite?.name}', call aseprite_sprites with select "${targetSprite?.id}"; ` +
+          "to work on the sprite that is active now, call aseprite_status first."
+      );
+    }
+    throw err;
+  }
+}
+
+function send(cmd, args = {}) {
   return new Promise((resolve, reject) => {
     if (!client || client.readyState !== client.OPEN) {
       reject(
@@ -1104,12 +1139,14 @@ tool(
   {
     title: "Status / sprite info",
     description:
-      "Checks the connection and returns info about the active sprite: size, color mode, layers, frames, active layer/frame. Coordinates start at (0,0) in the top-left corner.",
+      "Checks the connection and returns info about the active sprite: size, color mode, layers, frames, active layer/frame. Coordinates start at (0,0) in the top-left corner. " +
+      "The active sprite becomes the one all following tools work on.",
     inputSchema: {},
     annotations: { readOnlyHint: true },
   },
   async () => {
-    const info = { ...(await call("info")), server: VERSION, minExtension: MIN_EXTENSION };
+    const info = { ...(await call("info", {}, { noExpect: true })), server: VERSION, minExtension: MIN_EXTENSION };
+    setTarget(info); // looking at the active sprite makes it the one to work on
     const warning = versionWarning();
     if (warning) info.warning = warning;
     return asText(info);
@@ -1150,6 +1187,9 @@ for (const [name, op] of Object.entries(ops)) {
   );
 }
 
+// Arguments that default to the active frame
+const FRAME_KEYS = { pixel_map: ["frame"], set_pixels: ["frame"], draw: ["frame"], clear: ["frame"], outline: ["frame"], copy: ["fromFrame", "frame"] };
+
 const batchSchemas = Object.fromEntries(
   Object.entries(ops).map(([name, op]) => [name, z.object(op.shape).strict()])
 );
@@ -1176,6 +1216,9 @@ tool(
   async ({ ops: items }) => {
     const results = [];
     let needStatus = false;
+    // Ops without a frame all use the frame that was active when the batch started, even if the
+    // artist plays the animation meanwhile. Ops that change the active frame on purpose reset it.
+    let pinned = null;
     for (let i = 0; i < items.length; i++) {
       const { op: name, ...args } = items[i];
       const where = `op #${i + 1} (${name})`;
@@ -1185,7 +1228,15 @@ tool(
         throw new Error(`${where}: invalid arguments – ${why}. ${i} earlier op(s) were applied: ${JSON.stringify(results)}`);
       }
       try {
-        const res = await ops[name].run(parsed.data);
+        const data = parsed.data;
+        for (const key of FRAME_KEYS[name] ?? []) {
+          if (data[key] === undefined) {
+            pinned ??= (await call("info")).activeFrame;
+            if (pinned !== undefined) data[key] = pinned;
+          }
+        }
+        if (["new_sprite", "frame", "animation"].includes(name)) pinned = null;
+        const res = await ops[name].run(data);
         if (ops[name].returnsInfo) {
           needStatus = true;
           results.push("ok");
@@ -1297,6 +1348,28 @@ tool(
     }
     await storePalettes(all);
     return asText({ saved: name, palette: all[name] });
+  }
+);
+
+tool(
+  "aseprite_sprites",
+  {
+    title: "Open sprites",
+    description:
+      "Lists the sprites open in Aseprite (id, name, size, frames, which one is active). select (id or name) " +
+      "switches Aseprite to that sprite and makes it the one all following tools work on – use it after an " +
+      "'artist switched sprites' error or to work on several sprites in turn.",
+    inputSchema: { select: z.string().min(1).max(260).optional().describe("Sprite id (e.g. \"s2\") or file name") },
+  },
+  async ({ select }) => {
+    requireExtension("0.7.0", "aseprite_sprites");
+    const res = await call("sprites", select ? { select } : {});
+    const act = res.sprites.find((sp) => sp.active);
+    if (select && act) targetSprite = { id: act.id, name: act.name };
+    return asText({
+      sprites: res.sprites.map((sp) => ({ id: sp.id, name: sp.name, w: sp.width, h: sp.height, frames: sp.frames, ...(sp.active ? { active: true } : {}) })),
+      target: targetSprite?.id ?? null,
+    });
   }
 );
 

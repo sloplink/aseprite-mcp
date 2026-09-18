@@ -289,6 +289,30 @@ case("watch mode reports only the artist's edits", function()
   eq(H.changes{ reset = true }.watching, true)
 end)
 
+case("sprite ids, listing, selecting and the guard", function()
+  local i1 = H.new_sprite{ width = 4, height = 4 }
+  local s1 = app.sprite
+  local id1 = i1.spriteId
+  eq(type(id1), "string"); eq(i1.name, "Sprite")
+  eq(H.info().spriteId, id1, "id is stable")
+  local i2 = H.new_sprite{ width = 8, height = 2 }
+  local id2 = i2.spriteId
+  if id1 == id2 then error("two sprites share an id") end
+  -- expecting sprite 1 while sprite 2 is active fails; the right one passes
+  fails(function() H._guard("set_pixels", { expect = id1 }) end, "ACTIVE_SPRITE_CHANGED")
+  H._guard("set_pixels", { expect = id2 })
+  H._guard("new_sprite", { expect = id1 })              -- unguarded commands ignore expect
+  H._guard("set_pixels", {})                            -- no expectation, no check
+  local l = H.sprites{}
+  eq(#l.sprites >= 2, true, "both listed"); eq(l.active, id2)
+  if app.isUIAvailable then
+    local sel = H.sprites{ select = id1 }
+    eq(sel.active, id1); eq(app.sprite, s1)
+  end
+  fails(function() H.sprites{ select = "nope" } end, "No open sprite")
+  fails(function() H.sprites{ select = "Sprite" } end, "More than one")
+end)
+
 case("run_lua permission", function()
   H._allowLua = function() return false end
   fails(function() H.run_lua{ code = "return 1" } end, "disabled")

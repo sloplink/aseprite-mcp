@@ -7,7 +7,7 @@ local pc = app.pixelColor
 local H = {}
 
 -- Keep in sync with extension/package.json
-local EXTENSION_VERSION = "0.6.0"
+local EXTENSION_VERSION = "0.7.0"
 
 H.VERSION = EXTENSION_VERSION
 
@@ -111,6 +111,46 @@ local function findLayer(layers, name)
   return nil
 end
 
+-- ---------------------------------------------------------------------------
+-- Sprite identity: a short id per open sprite, kept in memory only (no file changes).
+-- Lets the server notice when the artist switched tabs between two commands.
+-- ---------------------------------------------------------------------------
+local known, nextId = {}, 1
+local function idOf(sprite)
+  for i = #known, 1, -1 do
+    local k = known[i]
+    local ok, same = pcall(function() return k.sprite == sprite end)
+    if ok and same then return k.id end
+  end
+  local id = "s" .. nextId
+  nextId = nextId + 1
+  known[#known + 1] = { sprite = sprite, id = id }
+  return id
+end
+
+local function spriteName(sprite)
+  local f = sprite.filename
+  if f and f ~= "" then return app.fs.fileName(f) end
+  return "Sprite"
+end
+
+-- Commands that may run whatever sprite is active (they choose or report it themselves)
+local UNGUARDED = { new_sprite = true, open = true, sprites = true, run_lua = true }
+
+-- Called by plugin.lua before every command
+function H._guard(name, a)
+  if not a.expect or UNGUARDED[name] then return end
+  local s = app.sprite
+  if not s then
+    error("No sprite is active in Aseprite (expected sprite " .. a.expect .. ").", 0)
+  end
+  local id = idOf(s)
+  if id ~= a.expect then
+    error("ACTIVE_SPRITE_CHANGED: the active sprite is now '" .. spriteName(s) .. "' (" .. id ..
+      "), not " .. a.expect .. ".", 0)
+  end
+end
+
 local function needSprite()
   local s = app.sprite
   if not s then error("No active sprite. Open one or create one with aseprite_new_sprite.") end
@@ -191,6 +231,8 @@ function H.info()
   local frames = {}
   for i, f in ipairs(s.frames) do frames[i] = f.duration end
   base.sprite = true
+  base.spriteId = idOf(s)
+  base.name = spriteName(s)
   base.filename = s.filename
   base.width = s.width
   base.height = s.height
@@ -639,6 +681,29 @@ function H.changes(a)
   end
   if not a.peek then snapshotAll(sprite) end
   return out
+end
+
+-- List open sprites; select = id or name makes that sprite active (switches the tab)
+function H.sprites(a)
+  local list, activeId = {}, app.sprite and idOf(app.sprite) or nil
+  if a.select then
+    local found
+    for _, s in ipairs(app.sprites) do
+      if idOf(s) == a.select or spriteName(s) == a.select then
+        if found then error("More than one open sprite is called '" .. a.select .. "'; select it by id.", 0) end
+        found = s
+      end
+    end
+    if not found then error("No open sprite '" .. tostring(a.select) .. "'.", 0) end
+    app.sprite = found
+    activeId = idOf(found)
+  end
+  for _, s in ipairs(app.sprites) do
+    local id = idOf(s)
+    list[#list + 1] = { id = id, name = spriteName(s), width = s.width, height = s.height,
+                        frames = #s.frames, active = id == activeId }
+  end
+  return { sprites = list, active = activeId }
 end
 
 function H.run_lua(a)

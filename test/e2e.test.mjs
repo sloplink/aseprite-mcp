@@ -233,7 +233,7 @@ test("pixel_map, batch and server instructions", async () => {
   const fake = await fakeAseprite(token, port, (msg) => {
     if (msg.cmd === "draw" && msg.args.tool === "curve") throw new Error("boom.");
     if (msg.cmd === "set_pixels") return { drawn: msg.args.pixels.length };
-    if (["info", "layer", "frame"].includes(msg.cmd)) return { width: 8, layers: [{ name: "a" }] };
+    if (["info", "layer", "frame"].includes(msg.cmd)) return { width: 8, activeFrame: 1, layers: [{ name: "a" }] };
     return {};
   });
   try {
@@ -276,8 +276,11 @@ test("pixel_map, batch and server instructions", async () => {
     assert.deepEqual(out.results, ["ok", {}, { drawn: 1 }]);
     assert.equal(out.status.width, 8);
     const sent = fake.cmds.slice(before).map((c) => c.cmd);
-    assert.deepEqual(sent, ["layer", "draw", "set_pixels", "info"]);
-    assert.equal(fake.cmds[before + 1].args.color, "#000000", "defaults are applied inside batch");
+    // the batch looks up the active frame once and pins it for all ops without a frame
+    assert.deepEqual(sent, ["layer", "info", "draw", "set_pixels", "info"]);
+    assert.equal(fake.cmds[before + 2].args.frame, 1);
+    assert.equal(fake.cmds[before + 3].args.frame, 1);
+    assert.equal(fake.cmds[before + 2].args.color, "#000000", "defaults are applied inside batch");
 
     r = await mcp.callTool({
       name: "aseprite_batch",
@@ -810,6 +813,99 @@ test("tool schemas stay compatible with strict MCP clients", async () => {
       if (JSON.stringify(args).includes('"red"') || JSON.stringify(args).includes('"#12"')) assert.match(r.content[0].text, /hex color/);
     }
   } finally {
+    await mcp.close();
+  }
+});
+
+test("sprite guard, aseprite_sprites and frame pinning", async () => {
+  const token = randomBytes(24).toString("hex");
+  const port = portCounter++;
+  const mcp = await startServer(token, port);
+  // a fake Aseprite with two open sprites; `active` is what the artist looks at
+  const state = { active: "s1", frame: 1, next: 3 };
+  const names = { s1: "level.aseprite", s2: "tileset.aseprite" };
+  const info = () => ({ sprite: true, spriteId: state.active, name: names[state.active], activeFrame: state.frame++ });
+  const fake = await fakeAseprite(token, port, (msg) => {
+    const a = msg.args;
+    if (a.expect && a.expect !== state.active && !["new_sprite", "open", "sprites"].includes(msg.cmd)) {
+      throw new Error(`ACTIVE_SPRITE_CHANGED: the active sprite is now '${names[state.active]}' (${state.active}), not ${a.expect}.`);
+    }
+    if (msg.cmd === "info") return info();
+    if (msg.cmd === "new_sprite") { const id = "s" + state.next++; names[id] = "Sprite"; state.active = id; return info(); }
+    if (msg.cmd === "sprites") {
+      if (a.select) state.active = a.select;
+      return { active: state.active, sprites: Object.keys(names).map((id) => ({ id, name: names[id], width: 8, height: 8, frames: 1, active: id === state.active })) };
+    }
+    if (msg.cmd === "set_pixels") return { drawn: a.pixels.length };
+    return {};
+  }, "0.7.0");
+  const call = (name, args) => mcp.callTool({ name, arguments: args });
+  const last = () => fake.cmds.at(-1);
+  try {
+    // status adopts the active sprite; later commands carry its id
+    let r = await call("aseprite_status", {});
+    assert.equal(JSON.parse(r.content[0].text).spriteId, "s1");
+    await call("aseprite_pixel_map", { palette: { a: "#fff" }, rows: ["a"] });
+    assert.equal(last().args.expect, "s1");
+
+    // the artist switches tabs: nothing is drawn, the message says how to go on
+    state.active = "s2";
+    const before = fake.cmds.filter((m) => m.cmd === "set_pixels").length;
+    r = await call("aseprite_pixel_map", { palette: { a: "#fff" }, rows: ["a"] });
+    assert.ok(r.isError);
+    assert.match(r.content[0].text, /artist switched sprites: the active sprite is now 'tileset\.aseprite'.*Nothing was changed.*select "s1"/s);
+    assert.equal(fake.cmds.filter((m) => m.cmd === "set_pixels" && !m.error).length, before + 1, "the refused command was the only attempt");
+
+    // aseprite_sprites lists and switches back
+    r = await call("aseprite_sprites", {});
+    assert.deepEqual(JSON.parse(r.content[0].text).sprites.map((x) => x.id), ["s1", "s2"]);
+    r = await call("aseprite_sprites", { select: "s1" });
+    assert.equal(JSON.parse(r.content[0].text).target, "s1");
+    r = await call("aseprite_pixel_map", { palette: { a: "#fff" }, rows: ["a"] });
+    assert.ok(!r.isError, r.content[0].text);
+
+    // status on the other sprite makes it the target
+    state.active = "s2";
+    await call("aseprite_status", {});
+    r = await call("aseprite_pixel_map", { palette: { a: "#fff" }, rows: ["a"] });
+    assert.ok(!r.isError);
+    assert.equal(last().args.expect, "s2");
+
+    // a new sprite becomes the target automatically
+    await call("aseprite_new_sprite", { width: 8, height: 8 });
+    await call("aseprite_draw", { tool: "line", points: [[0, 0], [1, 1]] });
+    assert.equal(last().args.expect, "s3");
+
+    // batch pins the frame even if the active frame moves on between ops
+    const n = fake.cmds.length;
+    r = await call("aseprite_batch", { ops: [
+      { op: "draw", tool: "line", points: [[0, 0], [1, 1]] },
+      { op: "pixel_map", palette: { a: "#fff" }, rows: ["a"] },
+      { op: "clear", rect: [0, 0, 1, 1] },
+      { op: "draw", tool: "line", points: [[0, 0], [1, 1]], frame: 9 },
+    ] });
+    assert.ok(!r.isError, r.content[0].text);
+    const frames = fake.cmds.slice(n).filter((m) => m.cmd !== "info").map((m) => m.args.frame);
+    assert.equal(new Set(frames.slice(0, 3)).size, 1, "same frame for all ops without frame: " + frames);
+    assert.equal(frames[3], 9, "an explicit frame is kept");
+  } finally {
+    fake.close();
+    await mcp.close();
+  }
+});
+
+test("no guard with extensions older than 0.7.0", async () => {
+  const token = randomBytes(24).toString("hex");
+  const port = portCounter++;
+  const mcp = await startServer(token, port);
+  const fake = await fakeAseprite(token, port, (msg) => (msg.cmd === "set_pixels" ? { drawn: 1 } : { spriteId: "s1", activeFrame: 1 }), "0.6.0");
+  try {
+    await mcp.callTool({ name: "aseprite_pixel_map", arguments: { palette: { a: "#fff" }, rows: ["a"] } });
+    assert.equal(fake.cmds.at(-1).args.expect, undefined);
+    const r = await mcp.callTool({ name: "aseprite_sprites", arguments: {} });
+    assert.match(r.content[0].text, /needs the MCP Bridge extension 0\.7\.0/);
+  } finally {
+    fake.close();
     await mcp.close();
   }
 });

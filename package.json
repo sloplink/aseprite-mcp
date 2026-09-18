@@ -1,6 +1,6 @@
 {
   "name": "aseprite-mcp",
-  "version": "0.6.0",
+  "version": "0.7.0",
   "description": "MCP server that lets an AI assistant (e.g. Claude) draw live in Aseprite",
   "type": "module",
   "main": "server.mjs",

@@ -4,6 +4,19 @@ Releases are versioned by the server. The Aseprite extension has its own version
 changes when its code changes; `aseprite_status` warns when the installed extension is too
 old for the server. After updating the extension, restart Aseprite.
 
+## 0.7.0
+
+Needs the MCP Bridge extension **0.7.0** for the sprite guard and `aseprite_sprites`; with older
+extensions everything else keeps working as before (without the guard).
+
+### Added
+- Sprite guard: the server remembers which sprite it works on (the one it created or opened, or
+  the active one after `aseprite_status`). If the artist switches to another sprite, drawing
+  commands stop with a clear message instead of drawing into the wrong sprite.
+- `aseprite_sprites`: lists open sprites and switches to one of them.
+- `aseprite_batch` pins the active frame for all ops without a `frame`, so playing the animation
+  in Aseprite during a batch no longer spreads the ops over several frames.
+
 ## 0.6.0
 
 Needs the MCP Bridge extension **0.6.0** for `aseprite_selection`, `aseprite_changes` and
