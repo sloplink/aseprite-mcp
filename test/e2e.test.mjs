@@ -7,7 +7,7 @@ import { createInterface } from "node:readline";
 import { createHmac, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { mkdtempSync, rmSync, writeFileSync, symlinkSync, readdirSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, symlinkSync, readdirSync, mkdirSync, utimesSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import WebSocket, { WebSocketServer } from "ws";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -934,7 +934,7 @@ test("automatic backup copies", async () => {
     await sleep(350);
     assert.equal(backups().length, 1, "one copy after a short pause");
     assert.equal(backups()[0].args.expect, "s1", "only the target sprite is copied");
-    assert.match(backups()[0].args.path, /-s1-level[\\/]\d{8}-\d{6}\.aseprite$/);
+    assert.match(backups()[0].args.path, /[\\/]level[\\/]\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}\.aseprite$/, "readable local names");
 
     await draw(); await draw();                       // changes in quick succession -> one copy
     await sleep(350);
@@ -951,7 +951,7 @@ test("automatic backup copies", async () => {
     // "save as" renames the sprite; the next backups go to a folder with the new name
     await mcp.callTool({ name: "aseprite_save", arguments: { path: join(dir, "renamed.aseprite") } });
     await draw(); await sleep(350);
-    assert.match(backups().at(-1).args.path, /-s1-renamed[\/]/);
+    assert.match(backups().at(-1).args.path, /[\\/]renamed[\\/]/);
 
     await draw();                                     // switching sprites saves the pending copy first
     await mcp.callTool({ name: "aseprite_new_sprite", arguments: { width: 4, height: 4 } });
@@ -962,8 +962,11 @@ test("automatic backup copies", async () => {
 
     const list = JSON.parse((await mcp.callTool({ name: "aseprite_backups", arguments: {} })).content[0].text);
     assert.equal(list.dir, dir);
-    assert.equal(list.backups[0].sprite, "Sprite (s2)");
-    assert.ok(list.backups.some((b) => b.sprite === "level (s1)"));
+    assert.match(list.backups[0].sprite, /^unsaved \d{4}-\d{2}-\d{2} \d{2}-\d{2} s2$/, "unsaved sprites get their own folder");
+    assert.ok(list.backups.some((b) => b.sprite === "level"));
+    const st = JSON.parse((await mcp.callTool({ name: "aseprite_status", arguments: {} })).content[0].text);
+    assert.equal(st.autosave.dir, dir);
+    assert.match(st.autosave.last, /unsaved/);
   } finally {
     fake.close();
     await mcp.close();
@@ -978,5 +981,43 @@ test("autosave can be switched off", async () => {
     assert.equal(r.content[0].text, '{"autosave":"off"}');
   } finally {
     await mcp.close();
+  }
+});
+
+test("backup clean-up and the notice when a sprite is adopted implicitly", async () => {
+  const token = randomBytes(24).toString("hex");
+  const port = portCounter++;
+  const dir = mkdtempSync(join(tmpdir(), "aseprite-mcp-autosave-"));
+  // leftovers: one copy older than 14 days, and 12 MB of recent copies (limit 10 MB)
+  mkdirSync(join(dir, "old sprite")); mkdirSync(join(dir, "big"));
+  writeFileSync(join(dir, "old sprite", "2026-01-01 10-00-00.aseprite"), "x");
+  const old = new Date(Date.now() - 20 * 86400000);
+  utimesSync(join(dir, "old sprite", "2026-01-01 10-00-00.aseprite"), old, old);
+  writeFileSync(join(dir, "big", "2026-09-01 10-00-00.aseprite"), Buffer.alloc(6 * 1024 * 1024));
+  const hourAgo = new Date(Date.now() - 3600000);
+  utimesSync(join(dir, "big", "2026-09-01 10-00-00.aseprite"), hourAgo, hourAgo);
+  writeFileSync(join(dir, "big", "2026-09-02 10-00-00.aseprite"), Buffer.alloc(6 * 1024 * 1024));
+  const mcp = await startServer(token, port, { ASEPRITE_MCP_AUTOSAVE: dir, ASEPRITE_MCP_AUTOSAVE_MB: "10", ASEPRITE_MCP_AUTOSAVE_DELAY: "100" });
+  const fake = await fakeAseprite(token, port, (msg) => {
+    if (msg.cmd === "backup") { writeFileSync(msg.args.path, "x"); return {}; }
+    if (msg.cmd === "info") return { spriteId: "s7", name: "castle.aseprite", activeFrame: 1 };
+    if (msg.cmd === "set_pixels") return { drawn: 1 };
+    return {};
+  }, "0.7.0");
+  try {
+    // no aseprite_status first: the server adopts the active sprite and says so once
+    let r = await mcp.callTool({ name: "aseprite_pixel_map", arguments: { palette: { a: "#fff" }, rows: ["a"] } });
+    assert.match(r.content.at(-1).text, /Now working on 'castle\.aseprite' \(s7\)/);
+    r = await mcp.callTool({ name: "aseprite_pixel_map", arguments: { palette: { a: "#fff" }, rows: ["a"] } });
+    assert.equal(r.content.length, 1, "the notice is shown only once");
+    await sleep(500);
+    assert.ok(!existsSync(join(dir, "old sprite")), "copies older than 14 days are removed with their empty folder");
+    assert.ok(!existsSync(join(dir, "big", "2026-09-01 10-00-00.aseprite")), "oldest copy removed to stay below the size limit");
+    assert.ok(existsSync(join(dir, "big", "2026-09-02 10-00-00.aseprite")));
+    assert.equal(readdirSync(join(dir, "castle")).length, 1, "the new copy is kept");
+  } finally {
+    fake.close();
+    await mcp.close();
+    rmSync(dir, { recursive: true, force: true });
   }
 });

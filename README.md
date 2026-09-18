@@ -158,9 +158,15 @@ opened, or the active one after `aseprite_status`). If you switch to another tab
 assistant works, its next call stops with a message instead of drawing into the wrong sprite.
 
 **Automatic backups:** a few seconds after the assistant changes a sprite, a copy is saved as
-`.aseprite` (all layers and frames) to `~/.config/aseprite-mcp/autosave`, the newest 5 per sprite.
-Your own files are never overwritten, and the sprite keeps its file name and unsaved state – so
-unsaved work survives closing Aseprite by mistake. Needs extension 0.7.0.
+`.aseprite` (all layers and frames), the newest 5 per sprite. Your own files are never overwritten,
+and the sprite keeps its file name and unsaved state – so unsaved work survives closing Aseprite by
+mistake. To restore one, press **Backups…** in the MCP Bridge window and pick it (or ask the
+assistant). The copies live in `~/.config/aseprite-mcp/autosave/<file name>/<date time>.aseprite`
+(unsaved sprites: `unsaved <date> <id>`); copies older than 14 days are deleted, and all copies
+together stay below 200 MB. Needs extension 0.7.0.
+
+Once connected, the MCP Bridge window shrinks to the status and a few buttons; **Settings…**
+shows token, port and the Lua option again.
 
 The server also sends a short usage guide ([instructions.md](instructions.md)) to the MCP
 client, so the assistant knows the efficient workflow (pixel map → batch → view once →
@@ -222,6 +228,8 @@ in error messages.
 | `ASEPRITE_MCP_PALETTE_FILE` | `~/.config/aseprite-mcp/palettes.json` | Where `aseprite_palette` stores palettes |
 | `ASEPRITE_MCP_AUTOSAVE` | `~/.config/aseprite-mcp/autosave` | Folder for automatic backup copies, or `off` |
 | `ASEPRITE_MCP_AUTOSAVE_KEEP` | `5` | Backup copies kept per sprite |
+| `ASEPRITE_MCP_AUTOSAVE_DAYS` | `14` | Backup copies older than this are deleted |
+| `ASEPRITE_MCP_AUTOSAVE_MB` | `200` | All backup copies together stay below this size |
 | `ASEPRITE_MCP_FILE_DIRS` | system temp directory (+ `/tmp` on macOS/Linux) | Directories the `file` option may read from (separated by `:`, on Windows `;`) |
 
 Example with Claude Code:

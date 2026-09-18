@@ -16,7 +16,17 @@ extensions everything else keeps working as before (without the guard).
 - `aseprite_sprites`: lists open sprites and switches to one of them.
 - Automatic backups: a few seconds after the assistant changes a sprite, a copy is saved as
   `.aseprite` to `~/.config/aseprite-mcp/autosave` (newest 5 per sprite, `ASEPRITE_MCP_AUTOSAVE`
-  to move or disable it). Original files are never touched. `aseprite_backups` lists the copies.
+  to move or disable it). Original files are never touched. `aseprite_backups` lists the copies,
+  and the **Backups…** button in the MCP Bridge window opens one directly. Copies are named
+  `<file name>/<local date time>.aseprite`; copies older than 14 days are deleted and all copies
+  together stay below 200 MB (`ASEPRITE_MCP_AUTOSAVE_DAYS`, `ASEPRITE_MCP_AUTOSAVE_MB`).
+- `aseprite_status` shows whether autosave works and where the copies go.
+- When the server adopts the active sprite on its own (first command after a restart), the result
+  says which sprite it is working on.
+
+### Changed
+- Once connected, the MCP Bridge window only shows the status and its buttons; **Settings…**
+  brings back token, port and the Lua option.
 - `aseprite_batch` pins the active frame for all ops without a `frame`, so playing the animation
   in Aseprite during a batch no longer spreads the ops over several frames.
 

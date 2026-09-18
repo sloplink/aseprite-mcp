@@ -17,6 +17,12 @@ local dlg            -- bridge window
 local ws             -- current WebSocket
 local authed = false -- true once the server has proven it knows the token
 local serverNonce, clientNonce
+local backupDir      -- where the server keeps backup copies (sent with "welcome")
+local statusText = "Not connected"
+local expanded = false   -- settings shown although connected
+local shownCompact = nil -- layout the window currently has
+local rebuilding = false
+local buildDialog        -- defined below
 
 if _VERSION == "Lua 5.3" then
   -- Lua 5.4 seeds randomly on its own; 5.3 needs help
@@ -34,7 +40,13 @@ local function trim(s)
 end
 
 local function setStatus(text)
+  statusText = text
   if dlg then pcall(function() dlg:modify{ id = "status", text = text } end) end
+end
+
+-- Connected: a small window (status + buttons). Otherwise: token, port and options as well.
+local function refreshLayout()
+  if dlg and shownCompact ~= (authed and not expanded) then buildDialog() end
 end
 
 local function send(sock, tbl)
@@ -106,15 +118,19 @@ local function handleAuth(sock, msg, token)
     local expected = S.hmacHex(token, "server|" .. clientNonce .. "|" .. serverNonce)
     if S.equals(msg.mac, expected) then
       authed = true
+      backupDir = type(msg.autosave) == "string" and msg.autosave or nil
       setStatus("Connected ✓")
+      refreshLayout()
     else
       setStatus("Server failed authentication - disconnected")
       disconnect()
+      refreshLayout()
     end
 
   elseif msg.type == "denied" then
     setStatus("Token rejected - check the token and press Connect")
     disconnect()
+    refreshLayout()
   end
   -- Anything else before authentication is ignored.
 end
@@ -167,39 +183,102 @@ local function connect()
   sock:connect()
 end
 
-local function showDialog()
-  if dlg then return end
+-- Backup copies made by the server, newest first; picking one opens it
+local function showBackups()
+  if not backupDir then
+    app.alert("No backup folder yet: connect to the aseprite-mcp server first (or autosave is off).")
+    return
+  end
+  local entries = {}
+  for _, d in ipairs(app.fs.listFiles(backupDir)) do
+    local dp = app.fs.joinPath(backupDir, d)
+    if app.fs.isDirectory(dp) then
+      for _, f in ipairs(app.fs.listFiles(dp)) do
+        if f:match("%.aseprite$") then
+          local stamp = f:gsub("%.aseprite$", "")
+          entries[#entries + 1] = { label = d .. "  -  " .. stamp, path = app.fs.joinPath(dp, f), key = stamp }
+        end
+      end
+    end
+  end
+  if #entries == 0 then
+    app.alert("No backup copies in " .. backupDir)
+    return
+  end
+  table.sort(entries, function(a, b) return a.key > b.key end)
+  local options = {}
+  for i = 1, math.min(#entries, 40) do options[i] = entries[i].label end
+  local bd = Dialog{ title = "Backups (newest first)" }
+  bd:combobox{ id = "pick", options = options, option = options[1] }
+  bd:label{ text = backupDir }
+  bd:button{ text = "Open", focus = true, onclick = function()
+    for _, e in ipairs(entries) do
+      if e.label == bd.data.pick then app.open(e.path); break end
+    end
+    bd:close()
+  end }
+  bd:button{ text = "Cancel", onclick = function() bd:close() end }
+  bd:show{ wait = false }
+end
+
+buildDialog = function()
+  local old = dlg and dlg.bounds
+  if dlg then
+    rebuilding = true
+    pcall(function() dlg:close() end)
+    rebuilding = false
+  end
+  local compact = authed and not expanded
+  shownCompact = compact
   dlg = Dialog{
     title = "MCP Bridge",
     onclose = function()
+      if rebuilding then return end
       disconnect()
       dlg = nil
     end,
   }
-  dlg:label{ id = "status", label = "Status:", text = "Not connected" }
-  dlg:separator{ text = "Settings" }
-  dlg:entry{
-    id = "token", label = "Token:", text = prefs.token or "",
-    onchange = function() prefs.token = trim(dlg.data.token) end,
-  }
-  dlg:number{
-    id = "port", label = "Port:", text = tostring(prefs.port or DEFAULT_PORT), decimals = 0,
-    onchange = function() prefs.port = math.floor(tonumber(dlg.data.port) or DEFAULT_PORT) end,
-  }
-  dlg:check{
-    id = "allowLua", text = "Allow arbitrary Lua code (aseprite_run_lua)",
-    selected = prefs.allowLua == true,
-    onclick = function() prefs.allowLua = dlg.data.allowLua == true end,
-  }
-  dlg:separator{}
-  dlg:button{ text = "Connect", onclick = connect }
+  dlg:label{ id = "status", label = "Status:", text = statusText }
+  if not compact then
+    dlg:separator{ text = "Settings" }
+    dlg:entry{
+      id = "token", label = "Token:", text = prefs.token or "",
+      onchange = function() prefs.token = trim(dlg.data.token) end,
+    }
+    dlg:number{
+      id = "port", label = "Port:", text = tostring(prefs.port or DEFAULT_PORT), decimals = 0,
+      onchange = function() prefs.port = math.floor(tonumber(dlg.data.port) or DEFAULT_PORT) end,
+    }
+    dlg:check{
+      id = "allowLua", text = "Allow arbitrary Lua code (aseprite_run_lua)",
+      selected = prefs.allowLua == true,
+      onclick = function() prefs.allowLua = dlg.data.allowLua == true end,
+    }
+    dlg:separator{}
+    dlg:button{ text = "Connect", onclick = connect }
+  end
+  dlg:button{ text = "Backups...", onclick = showBackups }
+  if authed then
+    dlg:button{ text = compact and "Settings..." or "Hide settings", onclick = function()
+      expanded = not expanded
+      buildDialog()
+    end }
+  end
   dlg:button{ text = "Disconnect", onclick = function()
     disconnect()
     setStatus("Not connected")
+    refreshLayout()
   end }
   dlg:button{ text = "Close", onclick = function() dlg:close() end }
   dlg:show{ wait = false }
+  if old then  -- keep the window where the user put it
+    pcall(function() dlg.bounds = Rectangle(old.x, old.y, dlg.bounds.width, dlg.bounds.height) end)
+  end
+end
 
+local function showDialog()
+  if dlg then return end
+  buildDialog()
   if #trim(prefs.token) >= 16 then connect() end
 end
 

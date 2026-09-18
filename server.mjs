@@ -106,7 +106,9 @@ Environment:
   ASEPRITE_MCP_PALETTE_FILE  saved palettes (default ${PALETTE_FILE})
   ASEPRITE_MCP_FILE_DIRS     directories the file option may read (default ${DEFAULT_FILE_DIRS})
   ASEPRITE_MCP_AUTOSAVE      backup copies folder, or "off" (default ${AUTOSAVE_DIR ?? "off"})
-  ASEPRITE_MCP_AUTOSAVE_KEEP backup copies kept per sprite (default 5)`);
+  ASEPRITE_MCP_AUTOSAVE_KEEP backup copies kept per sprite (default 5)
+  ASEPRITE_MCP_AUTOSAVE_DAYS delete backup copies older than this (default 14)
+  ASEPRITE_MCP_AUTOSAVE_MB   keep all backup copies below this size (default 200)`);
   process.exit(0);
 }
 
@@ -162,7 +164,7 @@ wss.on("connection", (ws, req) => {
       }
       authed = true;
       clearTimeout(authTimer);
-      ws.send(JSON.stringify({ type: "welcome", mac: hmac(TOKEN, `server|${msg.nonce}|${serverNonce}`) }));
+      ws.send(JSON.stringify({ type: "welcome", mac: hmac(TOKEN, `server|${msg.nonce}|${serverNonce}`), autosave: AUTOSAVE_DIR }));
       if (client && client !== ws) {
         log("New Aseprite connection replaces the previous one.");
         client.close(4000, "replaced");
@@ -221,6 +223,7 @@ function versionWarning() {
 // carries its id ("expect"), and the extension refuses to run it if the artist switched tabs.
 // ---------------------------------------------------------------------------
 let targetSprite = null; // { id, name }
+let adoptedNotice = null; // shown once with the next tool result
 const UNGUARDED = new Set(["new_sprite", "open", "sprites", "run_lua"]);
 const ADOPTS = new Set(["new_sprite", "open"]); // their result is the new target
 
@@ -233,7 +236,11 @@ const setTarget = (info) => {
 async function call(cmd, args = {}, { noExpect = false } = {}) {
   if (ADOPTS.has(cmd) || (cmd === "sprites" && args.select)) await flushBackups(); // before leaving a sprite
   if (guardSupported() && !UNGUARDED.has(cmd) && !noExpect) {
-    if (!targetSprite) setTarget(await send("info", {})); // first command: adopt the active sprite
+    if (!targetSprite) {
+      // first command after a (re)start: adopt the active sprite, and say so once
+      setTarget(await send("info", {}));
+      if (targetSprite) adoptedNotice = `Now working on '${targetSprite.name}' (${targetSprite.id}), the sprite that is active in Aseprite.`;
+    }
     if (targetSprite) args = { ...args, expect: targetSprite.id };
   }
   try {
@@ -255,11 +262,21 @@ async function call(cmd, args = {}, { noExpect = false } = {}) {
 // ---------------------------------------------------------------------------
 // Autosave: a few seconds after the assistant changed a sprite, the extension writes a copy of
 // it as .aseprite into AUTOSAVE_DIR. The sprite itself (file name, modified state) is untouched.
+//   <AUTOSAVE_DIR>/<file name>/2026-09-18 13-19-04.aseprite           saved sprites
+//   <AUTOSAVE_DIR>/unsaved 2026-09-18 13-13 s2/2026-09-18 13-19-04.aseprite   unsaved ones
+// Old copies are removed after AUTOSAVE_DAYS or when all copies exceed AUTOSAVE_MB.
 // ---------------------------------------------------------------------------
-const SESSION = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+const AUTOSAVE_DAYS = Math.max(1, Number(process.env.ASEPRITE_MCP_AUTOSAVE_DAYS ?? 14));
+const AUTOSAVE_MB = Math.max(10, Number(process.env.ASEPRITE_MCP_AUTOSAVE_MB ?? 200));
+const pad = (n) => String(n).padStart(2, "0");
+const localStamp = (d = new Date(), seconds = true) =>
+  `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}-${pad(d.getMinutes())}` +
+  (seconds ? `-${pad(d.getSeconds())}` : "");
+const SESSION = localStamp(new Date(), false);
 const dirtySprites = new Map(); // id -> name
 let backupTimer = null;
 let backupRunning = null;
+const autosaveState = { last: null, error: null };
 
 function noteChange() {
   if (!AUTOSAVE_DIR || !targetSprite || !guardSupported()) return;
@@ -269,7 +286,8 @@ function noteChange() {
   backupTimer.unref?.();
 }
 
-const safeName = (n) => String(n).replace(/\.aseprite$|\.ase$/i, "").replace(/[^\w.-]+/g, "_").slice(0, 40) || "sprite";
+const safeName = (n) => String(n).replace(/\.aseprite$|\.ase$/i, "").replace(/[^\w .-]+/g, "_").trim().slice(0, 60) || "sprite";
+const backupFolder = (id, name) => (name && name !== "Sprite" ? safeName(name) : `unsaved ${SESSION} ${id}`);
 
 async function flushBackups() {
   clearTimeout(backupTimer);
@@ -280,18 +298,61 @@ async function flushBackups() {
     if (!id || !dirtySprites.has(id)) return;
     const name = dirtySprites.get(id);
     dirtySprites.delete(id);
-    const dir = join(AUTOSAVE_DIR, `${SESSION}-${id}-${safeName(name)}`);
-    const stamp = new Date().toISOString().replace(/[-:]/g, "").slice(0, 15).replace("T", "-");
+    const dir = join(AUTOSAVE_DIR, backupFolder(id, name));
     try {
       await mkdir(dir, { recursive: true, mode: 0o700 });
-      await send("backup", { path: join(dir, `${stamp}.aseprite`), expect: id });
+      const path = join(dir, `${localStamp()}.aseprite`);
+      await send("backup", { path, expect: id });
+      autosaveState.last = path;
+      autosaveState.error = null;
       const files = (await readdir(dir)).filter((f) => f.endsWith(".aseprite")).sort();
       for (const old of files.slice(0, Math.max(0, files.length - AUTOSAVE_KEEP))) await rm(join(dir, old), { force: true });
     } catch (err) {
+      autosaveState.error = err.message;
       log("Backup skipped:", err.message);
     }
+    await cleanupBackups();
   })().finally(() => (backupRunning = null));
   return backupRunning;
+}
+
+// Remove copies older than AUTOSAVE_DAYS, then the oldest ones while the total exceeds AUTOSAVE_MB
+async function cleanupBackups() {
+  if (!AUTOSAVE_DIR) return;
+  try {
+    const files = [];
+    for (const d of await readdir(AUTOSAVE_DIR).catch(() => [])) {
+      const dir = join(AUTOSAVE_DIR, d);
+      for (const f of await readdir(dir).catch(() => [])) {
+        if (!f.endsWith(".aseprite")) continue;
+        const info = await stat(join(dir, f)).catch(() => null);
+        if (info?.isFile()) files.push({ path: join(dir, f), dir, time: info.mtimeMs, size: info.size });
+      }
+    }
+    files.sort((a, b) => a.time - b.time);
+    const cutoff = Date.now() - AUTOSAVE_DAYS * 86400000;
+    let total = files.reduce((n, f) => n + f.size, 0);
+    const dirs = new Set(files.map((f) => f.dir));
+    for (const f of files) {
+      if (f.time >= cutoff && total <= AUTOSAVE_MB * 1024 * 1024) break;
+      await rm(f.path, { force: true });
+      total -= f.size;
+    }
+    for (const d of dirs) if (!(await readdir(d).catch(() => ["x"])).length) await rm(d, { recursive: true, force: true });
+  } catch (err) {
+    log("Backup cleanup failed:", err.message);
+  }
+}
+setTimeout(() => cleanupBackups(), 2000).unref?.();
+
+// For aseprite_status: is autosave working, and where do the copies go?
+function autosaveInfo() {
+  if (!AUTOSAVE_DIR) return "off";
+  if (extensionVersion && !guardSupported()) return "off (needs the MCP Bridge extension 0.7.0)";
+  const out = { dir: AUTOSAVE_DIR };
+  if (autosaveState.last) out.last = autosaveState.last;
+  if (autosaveState.error) out.error = autosaveState.error;
+  return out;
 }
 
 function send(cmd, args = {}) {
@@ -338,6 +399,10 @@ function tool(name, config, fn) {
     try {
       const res = await fn(args ?? {});
       if (CHANGES_SPRITE.has(name) && !res?.isError) noteChange();
+      if (adoptedNotice && Array.isArray(res?.content)) {
+        res.content.push({ type: "text", text: adoptedNotice });
+        adoptedNotice = null;
+      }
       return res;
     } catch (err) {
       return { isError: true, content: [{ type: "text", text: String(err?.message ?? err) }] };
@@ -1209,6 +1274,8 @@ tool(
   async () => {
     const info = { ...(await call("info", {}, { noExpect: true })), server: VERSION, minExtension: MIN_EXTENSION };
     setTarget(info); // looking at the active sprite makes it the one to work on
+    adoptedNotice = null;
+    info.autosave = autosaveInfo();
     const warning = versionWarning();
     if (warning) info.warning = warning;
     return asText(info);
@@ -1451,9 +1518,7 @@ tool(
     const out = [];
     for (const d of await readdir(AUTOSAVE_DIR).catch(() => [])) {
       for (const f of await readdir(join(AUTOSAVE_DIR, d)).catch(() => [])) {
-        // folder: <session>-<id>-<name>; show "<name> (<id>)" so unsaved sprites called "Sprite" can be told apart
-        const m = d.match(/^\d{8}-\d{6}-(s\d+)-(.*)$/);
-        if (f.endsWith(".aseprite")) out.push({ sprite: m ? `${m[2]} (${m[1]})` : d, time: f.slice(0, 15), path: join(AUTOSAVE_DIR, d, f) });
+        if (f.endsWith(".aseprite")) out.push({ sprite: d, time: f.replace(/\.aseprite$/, ""), path: join(AUTOSAVE_DIR, d, f) });
       }
     }
     out.sort((a, b) => (a.time < b.time ? 1 : -1));
