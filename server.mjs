@@ -286,7 +286,10 @@ function noteChange() {
   backupTimer.unref?.();
 }
 
-const safeName = (n) => String(n).replace(/\.aseprite$|\.ase$/i, "").replace(/[^\w .-]+/g, "_").trim().slice(0, 60) || "sprite";
+const safeName = (n) =>
+  String(n).replace(/\.aseprite$|\.ase$/i, "").replace(/[^\w .-]+/g, "_").replace(/^[.\s]+/, "").trim().slice(0, 60) || "sprite";
+// Only files with these names are ever pruned or deleted (the folder may be set to one with other files)
+const BACKUP_FILE = /^(\d{4}-\d{2}-\d{2} \d{2}-\d{2}-\d{2}|\d{8}-\d{6})\.aseprite$/;
 const backupFolder = (id, name) => (name && name !== "Sprite" ? safeName(name) : `unsaved ${SESSION} ${id}`);
 
 async function flushBackups() {
@@ -305,7 +308,7 @@ async function flushBackups() {
       await send("backup", { path, expect: id });
       autosaveState.last = path;
       autosaveState.error = null;
-      const files = (await readdir(dir)).filter((f) => f.endsWith(".aseprite")).sort();
+      const files = (await readdir(dir)).filter((f) => BACKUP_FILE.test(f)).sort();
       for (const old of files.slice(0, Math.max(0, files.length - AUTOSAVE_KEEP))) await rm(join(dir, old), { force: true });
     } catch (err) {
       autosaveState.error = err.message;
@@ -324,7 +327,7 @@ async function cleanupBackups() {
     for (const d of await readdir(AUTOSAVE_DIR).catch(() => [])) {
       const dir = join(AUTOSAVE_DIR, d);
       for (const f of await readdir(dir).catch(() => [])) {
-        if (!f.endsWith(".aseprite")) continue;
+        if (!BACKUP_FILE.test(f)) continue;
         const info = await stat(join(dir, f)).catch(() => null);
         if (info?.isFile()) files.push({ path: join(dir, f), dir, time: info.mtimeMs, size: info.size });
       }

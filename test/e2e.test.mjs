@@ -997,6 +997,9 @@ test("backup clean-up and the notice when a sprite is adopted implicitly", async
   const hourAgo = new Date(Date.now() - 3600000);
   utimesSync(join(dir, "big", "2026-09-01 10-00-00.aseprite"), hourAgo, hourAgo);
   writeFileSync(join(dir, "big", "2026-09-02 10-00-00.aseprite"), Buffer.alloc(6 * 1024 * 1024));
+  // files the server did not name itself are never touched, however old
+  writeFileSync(join(dir, "big", "my-own-art.aseprite"), "mine");
+  utimesSync(join(dir, "big", "my-own-art.aseprite"), old, old);
   const mcp = await startServer(token, port, { ASEPRITE_MCP_AUTOSAVE: dir, ASEPRITE_MCP_AUTOSAVE_MB: "10", ASEPRITE_MCP_AUTOSAVE_DELAY: "100" });
   const fake = await fakeAseprite(token, port, (msg) => {
     if (msg.cmd === "backup") { writeFileSync(msg.args.path, "x"); return {}; }
@@ -1015,6 +1018,7 @@ test("backup clean-up and the notice when a sprite is adopted implicitly", async
     assert.ok(!existsSync(join(dir, "big", "2026-09-01 10-00-00.aseprite")), "oldest copy removed to stay below the size limit");
     assert.ok(existsSync(join(dir, "big", "2026-09-02 10-00-00.aseprite")));
     assert.equal(readdirSync(join(dir, "castle")).length, 1, "the new copy is kept");
+    assert.ok(existsSync(join(dir, "big", "my-own-art.aseprite")), "foreign files are never deleted");
   } finally {
     fake.close();
     await mcp.close();
