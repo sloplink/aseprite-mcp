@@ -1,3 +1,4 @@
+
 # MCP for Aseprite[Extension]
 
 Let an AI assistant draw live in your running **Aseprite** via the
@@ -6,8 +7,10 @@ Let an AI assistant draw live in your running **Aseprite** via the
 > Unofficial community project. Not affiliated with or endorsed by Anthropic or **Igara Studio (Aseprite)**.
 > **Use at your own risk** – see [DISCLAIMER.md](DISCLAIMER.md).
 
-<img width="198" height="391" alt="runner" src="https://github.com/user-attachments/assets/01d4661b-0e6f-4f6c-91dc-87c7177c3f47" />
-run animation prototype
+A few samples:
+<img width="128" height="64" alt="fisch2" src="https://github.com/user-attachments/assets/98fd7591-6159-40c5-ada5-1b538365576f" />
+<img width="32" height="64" alt="anime_run" src="https://github.com/user-attachments/assets/d5768ae0-2b19-4942-83ac-dc6e8ee40098" />
+<img width="32" height="32" alt="apfelbiss" src="https://github.com/user-attachments/assets/3de9ed38-3c33-475b-a33f-0855eb85b070" />
 
 ```
 MCP client ⇄ stdio ⇄ aseprite-mcp ⇄ WebSocket 127.0.0.1 ⇄ Aseprite + MCP Bridge extension
