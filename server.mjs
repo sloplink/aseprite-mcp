@@ -14,7 +14,7 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { WebSocketServer } from "ws";
 import { z } from "zod";
-import { readFile, writeFile, mkdir, unlink, chmod, rename, stat, realpath } from "node:fs/promises";
+import { readFile, writeFile, mkdir, unlink, chmod, rename, stat, realpath, readdir, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join, dirname, isAbsolute, sep, delimiter } from "node:path";
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from "node:crypto";
@@ -36,6 +36,11 @@ const PALETTE_FILE = process.env.ASEPRITE_MCP_PALETTE_FILE ?? join(CONFIG_DIR, "
 // Directories the `file` option may read from. Default: the system temp directory, plus /tmp on
 // macOS/Linux (on macOS the temp directory is /var/folders/..., but tools often write to /tmp).
 const DEFAULT_FILE_DIRS = [tmpdir(), ...(process.platform === "win32" ? [] : ["/tmp"])].join(delimiter);
+// Automatic backup copies of the sprites the assistant changes ("off" disables it)
+const AUTOSAVE_DIR =
+  process.env.ASEPRITE_MCP_AUTOSAVE === "off" ? null : (process.env.ASEPRITE_MCP_AUTOSAVE || join(CONFIG_DIR, "autosave"));
+const AUTOSAVE_KEEP = Math.max(1, Number(process.env.ASEPRITE_MCP_AUTOSAVE_KEEP ?? 5));
+const AUTOSAVE_DELAY_MS = Math.max(50, Number(process.env.ASEPRITE_MCP_AUTOSAVE_DELAY ?? 4000));
 const FILE_DIRS = [...new Set((process.env.ASEPRITE_MCP_FILE_DIRS ?? DEFAULT_FILE_DIRS).split(delimiter).filter(Boolean))];
 
 const log = (...a) => console.error("[aseprite-mcp]", ...a);
@@ -99,7 +104,9 @@ Environment:
   ASEPRITE_MCP_TOKEN         use this token instead of the token file
   ASEPRITE_MCP_TOKEN_FILE    token file location (default ${TOKEN_FILE})
   ASEPRITE_MCP_PALETTE_FILE  saved palettes (default ${PALETTE_FILE})
-  ASEPRITE_MCP_FILE_DIRS     directories the file option may read (default ${DEFAULT_FILE_DIRS})`);
+  ASEPRITE_MCP_FILE_DIRS     directories the file option may read (default ${DEFAULT_FILE_DIRS})
+  ASEPRITE_MCP_AUTOSAVE      backup copies folder, or "off" (default ${AUTOSAVE_DIR ?? "off"})
+  ASEPRITE_MCP_AUTOSAVE_KEEP backup copies kept per sprite (default 5)`);
   process.exit(0);
 }
 
@@ -224,6 +231,7 @@ const setTarget = (info) => {
 
 // noExpect: run on whatever sprite is active (used by aseprite_status to adopt it)
 async function call(cmd, args = {}, { noExpect = false } = {}) {
+  if (ADOPTS.has(cmd) || (cmd === "sprites" && args.select)) await flushBackups(); // before leaving a sprite
   if (guardSupported() && !UNGUARDED.has(cmd) && !noExpect) {
     if (!targetSprite) setTarget(await send("info", {})); // first command: adopt the active sprite
     if (targetSprite) args = { ...args, expect: targetSprite.id };
@@ -242,6 +250,48 @@ async function call(cmd, args = {}, { noExpect = false } = {}) {
     }
     throw err;
   }
+}
+
+// ---------------------------------------------------------------------------
+// Autosave: a few seconds after the assistant changed a sprite, the extension writes a copy of
+// it as .aseprite into AUTOSAVE_DIR. The sprite itself (file name, modified state) is untouched.
+// ---------------------------------------------------------------------------
+const SESSION = new Date().toISOString().replace(/[-:]/g, "").replace("T", "-").slice(0, 15);
+const dirtySprites = new Map(); // id -> name
+let backupTimer = null;
+let backupRunning = null;
+
+function noteChange() {
+  if (!AUTOSAVE_DIR || !targetSprite || !guardSupported()) return;
+  dirtySprites.set(targetSprite.id, targetSprite.name);
+  clearTimeout(backupTimer);
+  backupTimer = setTimeout(() => flushBackups().catch(() => {}), AUTOSAVE_DELAY_MS);
+  backupTimer.unref?.();
+}
+
+const safeName = (n) => String(n).replace(/\.aseprite$|\.ase$/i, "").replace(/[^\w.-]+/g, "_").slice(0, 40) || "sprite";
+
+async function flushBackups() {
+  clearTimeout(backupTimer);
+  if (backupRunning) return backupRunning;
+  backupRunning = (async () => {
+    // only the sprite that is still the target can be copied (the extension saves the active one)
+    const id = targetSprite?.id;
+    if (!id || !dirtySprites.has(id)) return;
+    const name = dirtySprites.get(id);
+    dirtySprites.delete(id);
+    const dir = join(AUTOSAVE_DIR, `${SESSION}-${id}-${safeName(name)}`);
+    const stamp = new Date().toISOString().replace(/[-:]/g, "").slice(0, 15).replace("T", "-");
+    try {
+      await mkdir(dir, { recursive: true, mode: 0o700 });
+      await send("backup", { path: join(dir, `${stamp}.aseprite`), expect: id });
+      const files = (await readdir(dir)).filter((f) => f.endsWith(".aseprite")).sort();
+      for (const old of files.slice(0, Math.max(0, files.length - AUTOSAVE_KEEP))) await rm(join(dir, old), { force: true });
+    } catch (err) {
+      log("Backup skipped:", err.message);
+    }
+  })().finally(() => (backupRunning = null));
+  return backupRunning;
 }
 
 function send(cmd, args = {}) {
@@ -276,10 +326,19 @@ const asText = (obj) => ({
   content: [{ type: "text", text: typeof obj === "string" ? obj : JSON.stringify(obj) }],
 });
 
+// Tools that change the target sprite and therefore trigger a backup copy
+const CHANGES_SPRITE = new Set(
+  ["new_sprite", "pixel_map", "set_pixels", "draw", "clear", "layer", "frame", "history", "copy", "animation", "outline", "batch"].map(
+    (n) => `aseprite_${n}`
+  )
+);
+
 function tool(name, config, fn) {
   server.registerTool(name, config, async (args) => {
     try {
-      return await fn(args ?? {});
+      const res = await fn(args ?? {});
+      if (CHANGES_SPRITE.has(name) && !res?.isError) noteChange();
+      return res;
     } catch (err) {
       return { isError: true, content: [{ type: "text", text: String(err?.message ?? err) }] };
     }
@@ -1370,6 +1429,30 @@ tool(
       sprites: res.sprites.map((sp) => ({ id: sp.id, name: sp.name, w: sp.width, h: sp.height, frames: sp.frames, ...(sp.active ? { active: true } : {}) })),
       target: targetSprite?.id ?? null,
     });
+  }
+);
+
+tool(
+  "aseprite_backups",
+  {
+    title: "Backup copies",
+    description:
+      "Lists the automatic backup copies (newest first). A few seconds after the assistant changes a sprite, a copy is saved " +
+      "as .aseprite; the artist's own files are never overwritten. Open one with aseprite_open to restore it.",
+    inputSchema: { limit: int.min(1).max(50).optional().describe("How many to list (default 10)") },
+    annotations: { readOnlyHint: true },
+  },
+  async ({ limit = 10 }) => {
+    if (!AUTOSAVE_DIR) return asText({ autosave: "off" });
+    await flushBackups();
+    const out = [];
+    for (const d of await readdir(AUTOSAVE_DIR).catch(() => [])) {
+      for (const f of await readdir(join(AUTOSAVE_DIR, d)).catch(() => [])) {
+        if (f.endsWith(".aseprite")) out.push({ sprite: d.replace(/^\d{8}-\d{6}-s\d+-/, ""), time: f.slice(0, 15), path: join(AUTOSAVE_DIR, d, f) });
+      }
+    }
+    out.sort((a, b) => (a.time < b.time ? 1 : -1));
+    return asText({ dir: AUTOSAVE_DIR, backups: out.slice(0, limit) });
   }
 );
 

@@ -15,6 +15,8 @@ All trademarks belong to their respective owners.
   draw over, clear, or delete layers, frames, and pixels.
 - `aseprite_save` and `aseprite_open` can read and **overwrite any file your user account can access**.
 - `aseprite_palette` writes saved palettes to `~/.config/aseprite-mcp/palettes.json`.
+- Automatic backup copies of the sprites the assistant changes are written to
+  `~/.config/aseprite-mcp/autosave` (newest 5 per sprite; `ASEPRITE_MCP_AUTOSAVE=off` disables them).
 - The `file` option of `aseprite_pixel_map` / `aseprite_animation` reads `.json` files of your user
   account from the temp directory (or `ASEPRITE_MCP_FILE_DIRS`). Only drawing data is used, and error
   messages never include the file's contents – but drawn data can be read back as pixels.

@@ -313,6 +313,24 @@ case("sprite ids, listing, selecting and the guard", function()
   fails(function() H.sprites{ select = "Sprite" } end, "More than one")
 end)
 
+case("backup copies leave the sprite untouched", function()
+  H.new_sprite{ width = 3, height = 2 }
+  H.set_pixels{ pixels = { { 1, 1, "#ff0000" } } }
+  local file = app.fs.joinPath(tmp, "work.aseprite")
+  H.save{ path = file }
+  H.set_pixels{ pixels = { { 0, 0, "#00ff00" } } }
+  local copy = app.fs.joinPath(tmp, "backup-1.aseprite")
+  eq(H.backup{ path = copy }.saved, copy)
+  eq(app.fs.isFile(copy), true, "copy written")
+  eq(app.sprite.filename, file, "file name unchanged")
+  fails(function() H.backup{ path = app.fs.joinPath(tmp, "x.png") } end, "must end in .aseprite")
+  local s = app.sprite
+  local b = app.open(copy)
+  eq(px(H.get_pixels{}, 0, 0), "00ff00ff", "copy has the unsaved change")
+  b:close()
+  app.sprite = s
+end)
+
 case("run_lua permission", function()
   H._allowLua = function() return false end
   fails(function() H.run_lua{ code = "return 1" } end, "disabled")

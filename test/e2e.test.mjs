@@ -7,7 +7,7 @@ import { createInterface } from "node:readline";
 import { createHmac, randomBytes } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { dirname, join } from "node:path";
-import { mkdtempSync, rmSync, writeFileSync, symlinkSync } from "node:fs";
+import { mkdtempSync, rmSync, writeFileSync, symlinkSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import WebSocket, { WebSocketServer } from "ws";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
@@ -54,7 +54,7 @@ async function startServer(token, port, env = {}) {
   const transport = new StdioClientTransport({
     command: "node",
     args: [join(root, "server.mjs")],
-    env: { ...process.env, ASEPRITE_MCP_TOKEN: token, ASEPRITE_MCP_PORT: String(port), ASEPRITE_MCP_ALLOW_LUA: "1", ...env },
+    env: { ...process.env, ASEPRITE_MCP_TOKEN: token, ASEPRITE_MCP_PORT: String(port), ASEPRITE_MCP_ALLOW_LUA: "1", ASEPRITE_MCP_AUTOSAVE: "off", ...env },
     stderr: "ignore",
   });
   const client = new Client({ name: "test", version: "1" });
@@ -906,6 +906,72 @@ test("no guard with extensions older than 0.7.0", async () => {
     assert.match(r.content[0].text, /needs the MCP Bridge extension 0\.7\.0/);
   } finally {
     fake.close();
+    await mcp.close();
+  }
+});
+
+test("automatic backup copies", async () => {
+  const token = randomBytes(24).toString("hex");
+  const port = portCounter++;
+  const dir = mkdtempSync(join(tmpdir(), "aseprite-mcp-autosave-"));
+  const mcp = await startServer(token, port, { ASEPRITE_MCP_AUTOSAVE: dir, ASEPRITE_MCP_AUTOSAVE_KEEP: "2", ASEPRITE_MCP_AUTOSAVE_DELAY: "100" });
+  const state = { active: "s1", n: 2 };
+  const names = { s1: "level.aseprite" };
+  const fake = await fakeAseprite(token, port, (msg) => {
+    const a = msg.args;
+    if (msg.cmd === "backup") { writeFileSync(a.path, "x"); return { saved: a.path }; }
+    if (msg.cmd === "new_sprite") { state.active = "s" + state.n++; names[state.active] = "Sprite"; }
+    if (["info", "new_sprite"].includes(msg.cmd)) return { spriteId: state.active, name: names[state.active], activeFrame: 1 };
+    if (msg.cmd === "set_pixels") return { drawn: 1 };
+    if (msg.cmd === "get_pixels") return { x: 0, y: 0, width: 1, height: 1, frame: 1, rows: ["00000000"] };
+    return {};
+  }, "0.7.0");
+  const backups = (cmd) => fake.cmds.filter((m) => m.cmd === "backup");
+  const draw = () => mcp.callTool({ name: "aseprite_pixel_map", arguments: { palette: { a: "#fff" }, rows: ["a"] } });
+  try {
+    await mcp.callTool({ name: "aseprite_status", arguments: {} });
+    await draw();
+    await sleep(350);
+    assert.equal(backups().length, 1, "one copy after a short pause");
+    assert.equal(backups()[0].args.expect, "s1", "only the target sprite is copied");
+    assert.match(backups()[0].args.path, /-s1-level[\\/]\d{8}-\d{6}\.aseprite$/);
+
+    await draw(); await draw();                       // changes in quick succession -> one copy
+    await sleep(350);
+    assert.equal(backups().length, 2);
+
+    await mcp.callTool({ name: "aseprite_read_pixels", arguments: {} });   // read-only: no copy
+    await sleep(350);
+    assert.equal(backups().length, 2);
+
+    await draw(); await sleep(1100); await draw(); await sleep(350);      // new second -> new file
+    const folder = readdirSync(dir)[0];
+    assert.equal(readdirSync(join(dir, folder)).length, 2, "only the newest KEEP copies stay");
+
+    await draw();                                     // switching sprites saves the pending copy first
+    await mcp.callTool({ name: "aseprite_new_sprite", arguments: { width: 4, height: 4 } });
+    const i = fake.cmds.findIndex((m) => m.cmd === "new_sprite");
+    assert.equal(fake.cmds[i - 1].cmd, "backup");
+    await sleep(350);
+    assert.equal(backups().at(-1).args.expect, "s2", "the new sprite gets its own copies");
+
+    const list = JSON.parse((await mcp.callTool({ name: "aseprite_backups", arguments: {} })).content[0].text);
+    assert.equal(list.dir, dir);
+    assert.equal(list.backups[0].sprite, "Sprite");
+    assert.ok(list.backups.some((b) => b.sprite === "level"));
+  } finally {
+    fake.close();
+    await mcp.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("autosave can be switched off", async () => {
+  const mcp = await startServer(randomBytes(24).toString("hex"), portCounter++);
+  try {
+    const r = await mcp.callTool({ name: "aseprite_backups", arguments: {} });
+    assert.equal(r.content[0].text, '{"autosave":"off"}');
+  } finally {
     await mcp.close();
   }
 });

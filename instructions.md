@@ -24,6 +24,7 @@ Aseprite MCP: draw pixel art live in the user's Aseprite. Coordinates are 0-base
 - Outline → draw flat shapes, then `aseprite_outline` (selective outline by default) instead of drawing outline pixels
 - "this part", "here" → `rect: "selection"` or `aseprite_selection`; drawing together → `aseprite_changes` (first call starts watching, later calls return only the artist's edits)
 - Several open sprites → `aseprite_sprites` lists them and `select` switches. Tools work on the sprite you created/opened or last saw with `aseprite_status`; if the artist switches tabs, calls stop with "artist switched sprites" and change nothing – then select the right sprite or call `aseprite_status`
+- Lost or unsaved work → `aseprite_backups` (automatic copies), then `aseprite_open`
 - Mistake → `aseprite_history` undo (each tool call and each batch op is its own undo step)
 
 ## pixel_map format

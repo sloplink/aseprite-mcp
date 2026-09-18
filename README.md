@@ -143,6 +143,7 @@ The order of steps 1 and 2 does not matter; the bridge reconnects automatically.
 | `aseprite_palette` | Save, list and delete named palettes, collect one from the image, or build hue-shifted shading ramps; use via `paletteName` |
 | `aseprite_outline` | Selective outline ("sel-out") or solid outline around/inside the shapes |
 | `aseprite_sprites` | Lists the open sprites and switches between them |
+| `aseprite_backups` | Lists the automatic backup copies (open one with `aseprite_open` to restore it) |
 | `aseprite_selection` | The region the artist selected; most tools also take `rect: "selection"` |
 | `aseprite_changes` | Watch mode: only the pixels the artist changed since the last call |
 | `aseprite_view` | Returns an upscaled PNG so the assistant can see the image (optionally only a zoomed-in `rect`); `critique: true` gives one small review sheet (colour, grayscale, silhouette, 1x, colour-blindness) |
@@ -155,6 +156,11 @@ Most tools work with the MCP Bridge extension 0.4.0 or newer; `aseprite_selectio
 **Sprite guard:** the tools remember which sprite they work on (the one the assistant created or
 opened, or the active one after `aseprite_status`). If you switch to another tab while the
 assistant works, its next call stops with a message instead of drawing into the wrong sprite.
+
+**Automatic backups:** a few seconds after the assistant changes a sprite, a copy is saved as
+`.aseprite` (all layers and frames) to `~/.config/aseprite-mcp/autosave`, the newest 5 per sprite.
+Your own files are never overwritten, and the sprite keeps its file name and unsaved state – so
+unsaved work survives closing Aseprite by mistake. Needs extension 0.7.0.
 
 The server also sends a short usage guide ([instructions.md](instructions.md)) to the MCP
 client, so the assistant knows the efficient workflow (pixel map → batch → view once →
@@ -214,6 +220,8 @@ in error messages.
 | `ASEPRITE_MCP_TOKEN` | – | Use this token instead of the token file |
 | `ASEPRITE_MCP_TOKEN_FILE` | see above | Token file location |
 | `ASEPRITE_MCP_PALETTE_FILE` | `~/.config/aseprite-mcp/palettes.json` | Where `aseprite_palette` stores palettes |
+| `ASEPRITE_MCP_AUTOSAVE` | `~/.config/aseprite-mcp/autosave` | Folder for automatic backup copies, or `off` |
+| `ASEPRITE_MCP_AUTOSAVE_KEEP` | `5` | Backup copies kept per sprite |
 | `ASEPRITE_MCP_FILE_DIRS` | system temp directory (+ `/tmp` on macOS/Linux) | Directories the `file` option may read from (separated by `:`, on Windows `;`) |
 
 Example with Claude Code:

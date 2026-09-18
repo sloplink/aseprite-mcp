@@ -683,6 +683,16 @@ function H.changes(a)
   return out
 end
 
+-- Backup copy of the active sprite; the sprite keeps its file name and "modified" state
+function H.backup(a)
+  local s = needSprite()
+  if type(a.path) ~= "string" or not a.path:lower():match("%.aseprite$") then
+    error("backup path must end in .aseprite", 0)
+  end
+  app.command.SaveFileCopyAs{ ui = false, filename = a.path }
+  return { saved = a.path, name = spriteName(s) }
+end
+
 -- List open sprites; select = id or name makes that sprite active (switches the tab)
 function H.sprites(a)
   local list, activeId = {}, app.sprite and idOf(app.sprite) or nil

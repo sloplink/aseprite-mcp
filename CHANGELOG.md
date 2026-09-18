@@ -14,6 +14,9 @@ extensions everything else keeps working as before (without the guard).
   the active one after `aseprite_status`). If the artist switches to another sprite, drawing
   commands stop with a clear message instead of drawing into the wrong sprite.
 - `aseprite_sprites`: lists open sprites and switches to one of them.
+- Automatic backups: a few seconds after the assistant changes a sprite, a copy is saved as
+  `.aseprite` to `~/.config/aseprite-mcp/autosave` (newest 5 per sprite, `ASEPRITE_MCP_AUTOSAVE`
+  to move or disable it). Original files are never touched. `aseprite_backups` lists the copies.
 - `aseprite_batch` pins the active frame for all ops without a `frame`, so playing the animation
   in Aseprite during a batch no longer spreads the ops over several frames.
 
