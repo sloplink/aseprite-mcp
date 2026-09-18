@@ -948,6 +948,11 @@ test("automatic backup copies", async () => {
     const folder = readdirSync(dir)[0];
     assert.equal(readdirSync(join(dir, folder)).length, 2, "only the newest KEEP copies stay");
 
+    // "save as" renames the sprite; the next backups go to a folder with the new name
+    await mcp.callTool({ name: "aseprite_save", arguments: { path: join(dir, "renamed.aseprite") } });
+    await draw(); await sleep(350);
+    assert.match(backups().at(-1).args.path, /-s1-renamed[\/]/);
+
     await draw();                                     // switching sprites saves the pending copy first
     await mcp.callTool({ name: "aseprite_new_sprite", arguments: { width: 4, height: 4 } });
     const i = fake.cmds.findIndex((m) => m.cmd === "new_sprite");
@@ -957,8 +962,8 @@ test("automatic backup copies", async () => {
 
     const list = JSON.parse((await mcp.callTool({ name: "aseprite_backups", arguments: {} })).content[0].text);
     assert.equal(list.dir, dir);
-    assert.equal(list.backups[0].sprite, "Sprite");
-    assert.ok(list.backups.some((b) => b.sprite === "level"));
+    assert.equal(list.backups[0].sprite, "Sprite (s2)");
+    assert.ok(list.backups.some((b) => b.sprite === "level (s1)"));
   } finally {
     fake.close();
     await mcp.close();

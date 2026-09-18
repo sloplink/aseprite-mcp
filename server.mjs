@@ -16,7 +16,7 @@ import { WebSocketServer } from "ws";
 import { z } from "zod";
 import { readFile, writeFile, mkdir, unlink, chmod, rename, stat, realpath, readdir, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
-import { join, dirname, isAbsolute, sep, delimiter } from "node:path";
+import { join, dirname, basename, isAbsolute, sep, delimiter } from "node:path";
 import { randomUUID, randomBytes, createHmac, timingSafeEqual } from "node:crypto";
 import { deflateSync } from "node:zlib";
 
@@ -1186,9 +1186,12 @@ const ops = {
       path: z.string().optional().describe("Absolute path including extension (.aseprite, .png, .gif, ...)"),
       copy: z.boolean().default(false),
     },
-    run: (a) => {
+    run: async (a) => {
       if (a.path) checkImagePath(a.path);
-      return call("save", a);
+      const res = await call("save", a);
+      // "save as" renames the sprite; keep the name used in messages and backup folders current
+      if (a.path && !a.copy && targetSprite) targetSprite = { ...targetSprite, name: basename(a.path) };
+      return res;
     },
   },
 };
@@ -1448,7 +1451,9 @@ tool(
     const out = [];
     for (const d of await readdir(AUTOSAVE_DIR).catch(() => [])) {
       for (const f of await readdir(join(AUTOSAVE_DIR, d)).catch(() => [])) {
-        if (f.endsWith(".aseprite")) out.push({ sprite: d.replace(/^\d{8}-\d{6}-s\d+-/, ""), time: f.slice(0, 15), path: join(AUTOSAVE_DIR, d, f) });
+        // folder: <session>-<id>-<name>; show "<name> (<id>)" so unsaved sprites called "Sprite" can be told apart
+        const m = d.match(/^\d{8}-\d{6}-(s\d+)-(.*)$/);
+        if (f.endsWith(".aseprite")) out.push({ sprite: m ? `${m[2]} (${m[1]})` : d, time: f.slice(0, 15), path: join(AUTOSAVE_DIR, d, f) });
       }
     }
     out.sort((a, b) => (a.time < b.time ? 1 : -1));
